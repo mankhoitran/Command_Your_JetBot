@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+.conda/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Models / engines / weights (large binaries, rebuilt per-device)
+*.engine
+*.plan
+*.trt
+*.onnx
+*.pth
+*.pt
+*.ckpt
+*.bin
+*.caffemodel
+*.pb
+*.uff
+*.pkl
+*.h5
+*.t7
+models/
+weights/
+checkpoints/
+
+# Caches
+.cache/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.jupyter/
+.ipynb_checkpoints/
+*.log
+*.tmp
+
+# Runtime data (local state, not source)
+data/*.json
+data/*.db
+data/*.sqlite*
+!data/.gitkeep
+
+# Reference clones (patterns only, not vendored code)
+.references/*
+!.references/NOTES.md
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

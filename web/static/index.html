@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>JetBot Console</title>
+  <link rel="stylesheet" href="/app.css"/>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark"></span>
+      <div>
+        <h1>JETBOT CONSOLE</h1>
+        <p class="sub">Nano 4GB · cognitive runtime</p>
+      </div>
+    </div>
+    <div class="top-status">
+      <span class="pill" id="conn-pill">CONNECTING</span>
+      <span class="pill" id="estop-pill">E-STOP CLEAR</span>
+      <span class="pill" id="task-pill">IDLE</span>
+      <span class="mono" id="uptime">up 0s</span>
+    </div>
+    <button class="estop" id="btn-estop" type="button">STOP</button>
+  </header>
+
+  <main class="layout">
+    <section class="viewport card">
+      <div class="card-h">
+        <h2>Live camera</h2>
+        <div class="meta">
+          <span id="cam-backend">—</span>
+          <span id="cam-fps">0 fps</span>
+          <span id="cam-lat">0 ms</span>
+          <span id="cam-pose">pan 0° · tilt 0°</span>
+        </div>
+      </div>
+      <div class="stage">
+        <img id="stream" alt="camera" src="/video"/>
+        <div class="overlay-hud">
+          <div id="hud-block">FRONT —</div>
+          <div id="hud-nav">NAV idle</div>
+        </div>
+      </div>
+      <div class="pad">
+        <div class="pad-row">
+          <button data-act="look_up">CAM ▲</button>
+          <button data-act="forward">▲ FWD</button>
+          <button data-act="look_down">CAM ▼</button>
+        </div>
+        <div class="pad-row">
+          <button data-act="left">◀ LEFT</button>
+          <button data-act="stop" class="warn">STOP</button>
+          <button data-act="right">RIGHT ▶</button>
+        </div>
+        <div class="pad-row">
+          <button data-act="look_left">LOOK ◀</button>
+          <button data-act="backward">▼ BACK</button>
+          <button data-act="look_right">LOOK ▶</button>
+        </div>
+        <div class="pad-row">
+          <button data-act="scan">SCAN</button>
+          <button data-act="explore">EXPLORE</button>
+          <button data-act="look_forward">CENTER CAM</button>
+          <button id="btn-clear-estop" type="button">CLEAR E-STOP</button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="side">
+      <section class="card">
+        <div class="card-h"><h2>Robot</h2></div>
+        <div class="kv" id="robot-kv"></div>
+      </section>
+      <section class="card">
+        <div class="card-h"><h2>Health</h2></div>
+        <div class="health" id="health-grid"></div>
+      </section>
+      <section class="card">
+        <div class="card-h"><h2>Perception</h2></div>
+        <div class="kv" id="perc-kv"></div>
+        <div class="bins" id="bins"></div>
+        <ul class="objects" id="objects"></ul>
+      </section>
+    </aside>
+
+    <section class="lower">
+      <section class="card">
+        <div class="card-h"><h2>Task / Agent</h2></div>
+        <div class="kv" id="task-kv"></div>
+        <p class="say" id="agent-say">idle</p>
+        <form id="cmd-form">
+          <input id="cmd-text" autocomplete="off" placeholder="Tell the robot what to do…"/>
+          <button type="submit">SEND</button>
+        </form>
+        <div class="voice">
+          <label>Whisper audio
+            <input id="audio-file" type="file" accept="audio/*,.wav,.mp3,.ogg"/>
+          </label>
+          <span id="voice-status"></span>
+        </div>
+        <ul class="decisions" id="decisions"></ul>
+      </section>
+      <section class="card">
+        <div class="card-h"><h2>World</h2></div>
+        <pre class="world" id="world-pre"></pre>
+      </section>
+      <section class="card">
+        <div class="card-h"><h2>Memory</h2></div>
+        <ul class="mem" id="memory"></ul>
+      </section>
+      <section class="card">
+        <div class="card-h"><h2>Events</h2></div>
+        <ol class="events" id="events"></ol>
+      </section>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

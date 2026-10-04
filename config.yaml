@@ -1,0 +1,100 @@
+# JetBot cognitive runtime. Override with env JETBOT_* or --config.
+
+robot:
+  name: jetbot-nano
+  simulate_if_missing: true
+
+web:
+  host: 0.0.0.0
+  port: 8080
+  jpeg_quality: 60
+  mjpeg_fps: 12
+
+camera:
+  width: 320
+  height: 240
+  fps: 15
+  capture_width: 816
+  capture_height: 616
+  sensor_mode: 3
+  device: /dev/video0
+
+motors:
+  i2c_bus: 1
+  address: 96          # 0x60 MotorHAT
+  left_channel: 1
+  right_channel: 2
+  left_alpha: 1.0
+  right_alpha: 1.0
+  max_speed: 0.28
+  min_command: 0.05
+
+servo:
+  i2c_bus: 1
+  address: 64          # 0x40 PCA9685
+  pan_channel: 0
+  tilt_channel: 1
+  pan_min_deg: -70
+  pan_max_deg: 70
+  tilt_min_deg: -25
+  tilt_max_deg: 25
+  center_pan: 0
+  center_tilt: 0
+
+safety:
+  min_obstacle_m: 0.38
+  slow_obstacle_m: 0.70
+  max_speed: 0.25
+  max_turn: 0.35
+  stale_perception_s: 0.90
+  command_timeout_s: 1.20
+  watchdog_hz: 20
+  require_fresh_perception_to_move: true
+
+perception:
+  inference_width: 160
+  inference_height: 120
+  enable_depth: true
+  enable_detection: true
+  detection_interval_s: 0.20
+  depth_interval_s: 0.07
+  min_object_area: 400
+  haar_cascade: /usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml
+  ssd_engine: ""       # optional TensorRT engine path
+
+navigation:
+  goal_reach_m: 0.45
+  turn_in_place_speed: 0.22
+  cruise_speed: 0.18
+  bins: 5
+  blocked_bins_center: 0.35
+
+llm:
+  base_url: http://192.168.20.150:8008/v1
+  model: gemma-4-E4B-it-Q4_K_M
+  timeout_s: 25
+  max_tokens: 280
+  temperature: 0.2
+  min_reason_interval_s: 6.0
+
+whisper:
+  base_url: http://192.168.20.150:8003
+  timeout_s: 45
+
+typesafe:
+  enabled: false
+  api_url: https://api.typesafe.ai/v1/systemone
+  model: jev-latest
+  timeout_s: 8
+  api_key: ""          # or env TYPESAFE_API_KEY
+
+memory:
+  path: data/amem.json
+  max_notes: 400
+  retrieve_k: 5
+
+loops:
+  safety_hz: 20
+  navigation_hz: 10
+  agent_hz: 4
+  telemetry_hz: 2

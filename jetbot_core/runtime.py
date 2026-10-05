@@ -89,8 +89,8 @@ class JetBotRuntime(object):
         self.health.set("llm", ok, detail)
         ok, detail = self.whisper.health()
         self.health.set("whisper", ok, detail)
-        ts_on = bool(self.typesafe.enabled and self.typesafe.api_key)
-        self.health.set("typesafe", ts_on, "enabled" if ts_on else "disabled")
+        ts_on, ts_detail = self.typesafe.health()
+        self.health.set("typesafe", ts_on, ts_detail)
         self.health.set("memory", True, "notes=%d" % len(self.memory.notes))
 
     def start(self):
@@ -160,6 +160,7 @@ class JetBotRuntime(object):
             "agent": self.agent.snapshot(),
             "memory": self.memory.snapshot(),
             "estop": self.safety.estop,
+            "allow_motion": bool(self.cfg.get("robot", {}).get("allow_motion", False)),
         }
 
     def handle_manual(self, action, extra=None):

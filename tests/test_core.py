@@ -22,7 +22,7 @@ from jetbot_core.task import COMPLETED, EXECUTING, FAILED, IDLE, PLANNING, REPLA
 from jetbot_core.world import STALE, TrackedObject, WorldState
 from jetbot_core.perception.track import IoUTracker
 from jetbot_core.perception.detect import Detection
-from jetbot_core.hardware.motors import SimulatedMotors
+from jetbot_core.hardware.motors import JetbotLibController, SimulatedMotors
 from jetbot_core.hardware.camera import LatestFrameBuffer
 import numpy as np
 
@@ -80,6 +80,15 @@ class TaskTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             tm.transition(EXECUTING)
 
+    def test_pad_from_idle(self):
+        w = WorldState()
+        bus = EventBus()
+        tm = TaskManager(w, bus)
+        self.assertEqual(tm.state, IDLE)
+        tm.ensure_executing(action="left")
+        self.assertEqual(tm.state, EXECUTING)
+        self.assertEqual(tm.action, "left")
+
 
 class SafetyTests(unittest.TestCase):
     def _ctrl(self):
@@ -89,7 +98,9 @@ class SafetyTests(unittest.TestCase):
         w.set_perception_meta(last_depth_ts=time.time(), last_frame_ts=time.time())
         motors = SimulatedMotors()
         bus = EventBus()
-        return SafetyController(cfg, motors, w, bus), w, motors, bus
+        ctrl = SafetyController(cfg, motors, w, bus)
+        ctrl.allow_motion = True
+        return ctrl, w, motors, bus
 
     def test_obstacle_blocks_forward(self):
         ctrl, w, motors, bus = self._ctrl()
@@ -121,6 +132,17 @@ class SafetyTests(unittest.TestCase):
         ok, reason, safe = ctrl.validate(MotionCommand(1.0, 1.0, "unit", 1.0))
         self.assertTrue(ok)
         self.assertLessEqual(safe.left, ctrl.max_speed + 1e-6)
+
+    def test_motion_lock_accepts_without_spinning(self):
+        ctrl, w, motors, bus = self._ctrl()
+        ctrl.allow_motion = False
+        motors.set_speeds(0.0, 0.0)
+        ok, reason = ctrl.request(MotionCommand(-0.22, 0.22, "ui-left", 0.4))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "motion_locked")
+        snap = motors.snapshot()
+        self.assertEqual(snap["left"], 0.0)
+        self.assertEqual(snap["right"], 0.0)
 
 
 class MemoryTests(unittest.TestCase):
@@ -176,6 +198,38 @@ class ConfigTests(unittest.TestCase):
         cfg = load_config(os.path.join(ROOT, "config.yaml"))
         self.assertEqual(cfg["llm"]["base_url"], "http://192.168.20.150:8008/v1")
         self.assertEqual(cfg["whisper"]["base_url"], "http://192.168.20.150:8003")
+
+
+class FakeJetbotRobot(object):
+    def __init__(self):
+        self.left = 0.0
+        self.right = 0.0
+        self.calls = []
+
+    def set_motors(self, left_speed, right_speed):
+        self.left = left_speed
+        self.right = right_speed
+        self.calls.append(("set_motors", left_speed, right_speed))
+
+    def stop(self):
+        self.left = 0.0
+        self.right = 0.0
+        self.calls.append(("stop",))
+
+
+class JetbotLibTests(unittest.TestCase):
+    def test_set_motors_via_kit_api(self):
+        robot = FakeJetbotRobot()
+        ctrl = JetbotLibController(robot)
+        ctrl.set_speeds(-0.2, 0.2)
+        self.assertEqual(robot.calls[-1][0], "set_motors")
+        self.assertAlmostEqual(robot.left, -0.2)
+        self.assertAlmostEqual(robot.right, 0.2)
+        snap = ctrl.snapshot()
+        self.assertEqual(snap["backend"], "jetbot")
+        ctrl.stop()
+        self.assertEqual(robot.left, 0.0)
+        self.assertEqual(robot.right, 0.0)
 
 
 class GeometricDepthTests(unittest.TestCase):

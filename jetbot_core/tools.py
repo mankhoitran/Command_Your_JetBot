@@ -87,25 +87,25 @@ class ToolRouter(object):
     def _forward(self, args):
         d = self._duration(args, 1.0)
         self.planner.set_mode("forward", duration_s=d)
-        self.tasks.transition(EXECUTING, action="forward", progress=0.4)
+        self.tasks.ensure_executing(action="forward", progress=0.4)
         return {"ok": True, "duration": d}
 
     def _backward(self, args):
         d = self._duration(args, 0.6)
         self.planner.set_mode("backup", duration_s=d)
-        self.tasks.transition(EXECUTING, action="backup")
+        self.tasks.ensure_executing(action="backup")
         return {"ok": True, "duration": d}
 
     def _left(self, args):
         d = self._duration(args, 0.5)
         self.planner.set_mode("left", duration_s=d)
-        self.tasks.transition(EXECUTING, action="left")
+        self.tasks.ensure_executing(action="left")
         return {"ok": True, "duration": d}
 
     def _right(self, args):
         d = self._duration(args, 0.5)
         self.planner.set_mode("right", duration_s=d)
-        self.tasks.transition(EXECUTING, action="right")
+        self.tasks.ensure_executing(action="right")
         return {"ok": True, "duration": d}
 
     def _stop(self, args):
@@ -116,7 +116,7 @@ class ToolRouter(object):
     def _explore(self, args):
         d = self._duration(args, 3.0)
         self.planner.set_mode("explore", duration_s=d)
-        self.tasks.transition(EXECUTING, action="explore")
+        self.tasks.ensure_executing(action="explore")
         return {"ok": True, "duration": d}
 
     def _look(self, pose):
@@ -199,14 +199,14 @@ class ToolRouter(object):
         target = args.get("target") or args.get("name")
         self.planner.set_mode("explore", duration_s=2.5, target=target)
         self.world.set_navigation(current_target=target, mode="explore")
-        self.tasks.transition(EXECUTING, action="go_to")
+        self.tasks.ensure_executing(action="go_to")
         return {"ok": True, "target": target, "note": "local explore toward target; no metric map"}
 
     def _follow(self, args):
         target = args.get("target")
         self.planner.set_mode("follow", duration_s=4.0, target=target)
         self.world.set_navigation(current_target=target, mode="follow")
-        self.tasks.transition(EXECUTING, action="follow")
+        self.tasks.ensure_executing(action="follow")
         return {"ok": True, "target": target}
 
     def _remember(self, args):

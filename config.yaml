@@ -3,6 +3,9 @@
 robot:
   name: jetbot-nano
   simulate_if_missing: true
+  # Keep wheels locked while the battery is on a charger / table.
+  # Override with env JETBOT_ALLOW_MOTION=1 when the robot is on the floor.
+  allow_motion: false
 
 web:
   host: 0.0.0.0
@@ -82,11 +85,11 @@ whisper:
   timeout_s: 45
 
 typesafe:
-  enabled: false
-  api_url: https://api.typesafe.ai/v1/systemone
-  model: jev-latest
+  enabled: true
+  api_url: https://openrouter.ai/api/alpha/decisions
+  model: "~typesafe/jev-latest"
   timeout_s: 8
-  api_key: ""          # or env TYPESAFE_API_KEY
+  api_key: ""          # set OPENROUTER_API_KEY in .env (gitignored)
 
 memory:
   path: data/amem.json

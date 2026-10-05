@@ -49,6 +49,7 @@ class SafetyController(object):
         self.command_timeout_s = float(safety.get("command_timeout_s", 1.20))
         self.require_fresh = bool(safety.get("require_fresh_perception_to_move", True))
         self.min_command = float(motors_cfg.get("min_command", 0.05))
+        self.allow_motion = bool(cfg.get("robot", {}).get("allow_motion", False))
         self.motors = motors
         self.world = world
         self.bus = bus
@@ -100,6 +101,19 @@ class SafetyController(object):
                     "reason": "estop", "source": command.source,
                 })
                 return False, "estop"
+        if not self.allow_motion and (abs(command.left) > 1e-6 or abs(command.right) > 1e-6):
+            held = MotionCommand(0.0, 0.0, command.source, command.duration_s)
+            held.ts = command.ts
+            with self._lock:
+                self._command = held
+                self._last_reject = "motion_locked"
+            self.bus.emit(EventType.COMMAND_REJECTED, "safety", {
+                "reason": "motion_locked",
+                "source": command.source,
+                "requested": {"left": command.left, "right": command.right},
+            })
+            log.info("motion locked (charging); accepted %s without spinning", command.source)
+            return False, "motion_locked"
         ok, reason, safe = self.validate(command)
         if not ok:
             with self._lock:
@@ -173,7 +187,7 @@ class SafetyController(object):
             with self._lock:
                 estop = self._estop
                 cmd = self._command
-            if estop:
+            if estop or not self.allow_motion:
                 try:
                     self.motors.stop()
                 except Exception:

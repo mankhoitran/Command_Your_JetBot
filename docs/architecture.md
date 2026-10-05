@@ -28,7 +28,7 @@ Emergency stop: `SafetyController.emergency_stop()` → `motors.stop()`. No LLM,
 | Tools | `tools.py` | Semantic camera/motion/memory; never PWM |
 | LLM | `llm.py` | `192.168.20.150:8008/v1` chat completions |
 | Whisper | `whisper_client.py` | `192.168.20.150:8003/inference` |
-| TypeSafe | `typesafe_client.py` | Optional intent `choice` + confirm `noul` |
+| TypeSafe / Jev | `typesafe_client.py` | OpenRouter Decisions API, model `~typesafe/jev-latest` |
 | Web | `web.py` + `web/static` | MJPEG + JSON console |
 
 ## Camera path

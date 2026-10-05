@@ -44,6 +44,13 @@ checkpoints/
 *.log
 *.tmp
 
+# Secrets / local env (API keys stay off git)
+.env
+.env.*
+!.env.example
+secrets.yaml
+local.yaml
+
 # Runtime data (local state, not source)
 data/*.json
 data/*.db

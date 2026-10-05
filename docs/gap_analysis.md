@@ -139,9 +139,9 @@ keywords, tags, context, links, evolution on insert. Retrieval is semantic.
 We keep the note schema and evolution policy; storage is JSON + lexical
 overlap because ChromaDB cannot run here.
 
-**TypeSafe:** `POST https://api.typesafe.ai/v1/systemone` with `state` +
-typed `questions` (`choice` / `noul` / `score`). Used only for intent
-classification when an API key exists. Not a second brain.
+**TypeSafe / Jev:** `POST https://openrouter.ai/api/alpha/decisions` with `state` +
+typed `questions` (`choice` / `noul` / `score`), model `~typesafe/jev-latest`.
+Used only for intent classification when `OPENROUTER_API_KEY` exists. Not a second brain.
 
 ---
 

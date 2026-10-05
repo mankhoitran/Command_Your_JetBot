@@ -97,6 +97,8 @@
     pill($("conn-pill"), "CONNECTED", "ok");
     if (s.estop) pill($("estop-pill"), "E-STOP ACTIVE", "bad");
     else pill($("estop-pill"), "E-STOP CLEAR", "ok");
+    if (s.allow_motion) pill($("motion-pill"), "MOTION ON", "ok");
+    else pill($("motion-pill"), "MOTION LOCKED", "warn");
     var task = s.task || {};
     pill($("task-pill"), task.state || "IDLE", task.state === "FAILED" ? "bad" : "");
     $("uptime").textContent = "up " + Math.floor(s.uptime_s || 0) + "s";
@@ -120,6 +122,7 @@
       ["left", fmt(robot.left_speed, 2)],
       ["right", fmt(robot.right_speed, 2)],
       ["estop", robot.estop ? "YES" : "no"],
+      ["motion", s.allow_motion ? "enabled" : "LOCKED (charging)"],
       ["pose x,y", fmt((robot.pose || {}).x, 2) + ", " + fmt((robot.pose || {}).y, 2)]
     ]);
     var host = ((s.health || {}).host_metrics) || ((s.health || {}).host) || {};

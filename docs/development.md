@@ -30,8 +30,10 @@ E-STOP is the red button and `POST /api/estop`. It does not wait for the LLM.
 | `JETBOT_WEB_PORT` | HTTP port |
 | `JETBOT_LLM_URL` | OpenAI-compatible base, default `http://192.168.20.150:8008/v1` |
 | `JETBOT_WHISPER_URL` | whisper.cpp, default `http://192.168.20.150:8003` |
-| `TYPESAFE_API_KEY` | enables TypeSafe intent classification |
+| `OPENROUTER_API_KEY` | OpenRouter key for Jev (`~typesafe/jev-latest`) |
+| `TYPESAFE_API_KEY` | alias of OpenRouter key (legacy name) |
 | `JETBOT_SIMULATE` | force simulate-if-missing |
+| `JETBOT_ALLOW_MOTION` | `1` to unlock wheels (default locked while charging) |
 
 Remote LLM and Whisper URLs must stay on `.150` unless you change the config on purpose.
 

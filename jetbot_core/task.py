@@ -107,13 +107,20 @@ class TaskManager(object):
         return self.state
 
     def ensure_executing(self, action=None, progress=None):
-        """Pad/manual tools may fire while IDLE; promote through PLANNING."""
+        """Promote a named Agent task into EXECUTING. Pad/manual stays IDLE."""
         with self._lock:
+            if self.state == IDLE and not self.task_id:
+                self.action = action
+                if progress is not None:
+                    self.progress = float(progress)
+                self.updated_at = time.time()
+                self.world.set_task(
+                    id=self.task_id, name=self.name, state=self.state,
+                    action=self.action, progress=self.progress,
+                    failure_reason=self.failure_reason,
+                )
+                return self.state
             if self.state == IDLE:
-                if not self.task_id:
-                    self.task_id = uuid.uuid4().hex[:8]
-                    self.name = action or "manual"
-                    self.goal = self.name
                 self._set(PLANNING, action=action or "manual", progress=0.05)
             if self.state != EXECUTING:
                 try:

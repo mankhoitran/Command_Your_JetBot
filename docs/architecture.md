@@ -7,7 +7,7 @@ Python 3.6 process on Jetson Nano 4GB. The LLM is not the realtime controller.
 ```
 FAST  (~20 Hz)   perception freshness + obstacle distance → SafetyController → motors
 MEDIUM (~10 Hz)  latest RGB → depth heuristic + detect/track → WorldState → LocalPlanner
-SLOW   (event)   user/voice/nav-blocked → Agent → LLM/TypeSafe → semantic tools
+SLOW   (event)   user/voice/recovery-failed → Agent → keywords → TypeSafe → LLM
 ```
 
 Emergency stop: `SafetyController.emergency_stop()` → `motors.stop()`. No LLM, no HTTP, no memory.
@@ -19,7 +19,8 @@ Emergency stop: `SafetyController.emergency_stop()` → `motors.stop()`. No LLM,
 | Camera | `hardware/camera.py` | Gst/V4L2/synthetic capture thread → `LatestFrameBuffer` |
 | Perception | `perception/pipeline.py` | Latest-frame consumer; overlay for UI only |
 | World State | `world.py` | Operational truth: pose, obstacles, tracks, freshness |
-| Spatial | `spatial.py` | Landmarks / explored poses |
+| Spatial | `spatial.py` | Landmarks from detections / scans |
+| Servo | `hardware/servo.py` | **Disabled.** Camera is bolted forward (`servo.enabled: false`). `FixedServo` no-op until a PCA9685 is fitted. |
 | A-MEM-like | `memory.py` | Semantic notes, links, lexical retrieval |
 | Safety | `safety.py` | Clamp, stale-sensor, obstacle, e-stop, watchdog |
 | Navigation | `navigation.py` | Corridor follow, recovery turn, follow-bbox |
@@ -45,6 +46,8 @@ CSI/nvargus (or V4L2, or synthetic)
 
 Inference never sits in the capture callback.
 
+The camera optical axis **is** chassis forward. `camera.look_left` / `look_right` yaw the body; `look_up` / `look_down` are no-ops. `camera.scan_environment` is a still FOV survey (wheels locked) or in-place wheel turns. Do not skip chassis depth based on a fake pan.
+
 ## World vs memory
 
 Priority: **sensor → World State → spatial map → semantic memory**.
@@ -67,7 +70,10 @@ MotorController.set_speeds()
 ```
 
 Forward motion with stale depth is rejected. Obstacle closer than
-`safety.min_obstacle_m` zeros forward commands.
+`safety.min_obstacle_m` (0.18 m) zeros forward commands. In-place
+left/right are allowed down to `safety.turn_obstacle_m` (0.06 m).
+Wheels stay locked until `POST /api/motion` or the console UNLOCK
+WHEELS control (`allow_motion`).
 
 ## Task lifecycle
 
@@ -80,11 +86,17 @@ Uncertainty: `EXECUTING → ACTIVE_PERCEPTION → PLANNING`
 
 The local llama.cpp server advertises **n_ctx = 2048**. Prompts are a world
 summary + a few memory lines + the user instruction. The model must return a
-JSON tool plan. Local keyword/TypeSafe intents skip the LLM for stop/move/scan.
+JSON tool plan. **Keywords first**, then TypeSafe if unknown, then LLM.
+Pad/manual motion does not start a cognitive task. `NAVIGATION_BLOCKED`
+runs local recovery; the Agent replans only on `NAVIGATION_RECOVERY_FAILED`.
 
 ## Hardware backends
 
 On this Nano at audit time, I2C bus 1 had no MotorHAT (0x60) or PCA9685 (0x40).
-`simulate_if_missing: true` keeps motors/servo simulated so the rest of the
-stack is testable. When the HAT appears, the same interfaces drive it.
+`simulate_if_missing: true` keeps motors simulated. The camera servo stays
+**fixed/disabled** (`servo.enabled: false`) until a pan/tilt board is fitted;
+do not enable simulated pan — that would starve safety of body-frame depth.
+
+Geometric depth maps occupancy onto `[min_m, max_m]` with `min_m ≤ min_obstacle_m`
+so a near blob can actually trip `blocked` / the hard stop.
 ---

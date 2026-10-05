@@ -25,8 +25,11 @@ class LatestFrameBuffer(object):
     def put(self, frame, ts=None):
         if ts is None:
             ts = time.time()
+        stored = frame
+        if hasattr(frame, "copy"):
+            stored = frame.copy()
         with self._lock:
-            self._frame = frame
+            self._frame = stored
             self._ts = ts
             self._seq += 1
             self._cond.notify_all()

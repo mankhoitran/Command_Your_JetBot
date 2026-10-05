@@ -23,6 +23,7 @@ class PerceptionPipeline(object):
     def __init__(self, cfg, frame_buffer, world, bus, overlay_buffer):
         self.cfg = cfg.get("perception", {})
         self.nav_cfg = cfg.get("navigation", {})
+        self.safety_cfg = cfg.get("safety", {})
         self.frame_buffer = frame_buffer
         self.world = world
         self.bus = bus
@@ -31,7 +32,12 @@ class PerceptionPipeline(object):
         self._thread = None
         self.inf_w = int(self.cfg.get("inference_width", 160))
         self.inf_h = int(self.cfg.get("inference_height", 120))
-        self.depth = GeometricDepthEstimator(bins=int(self.nav_cfg.get("bins", 5)))
+        stop_m = float(self.safety_cfg.get("min_obstacle_m", 0.18))
+        self.depth = GeometricDepthEstimator(
+            bins=int(self.nav_cfg.get("bins", 5)),
+            min_m=min(0.05, stop_m),
+            blocked_m=stop_m,
+        )
         inner = ContourDetector(min_area=int(self.cfg.get("min_object_area", 400)))
         engine = self.cfg.get("ssd_engine") or ""
         if engine and os.path.isfile(engine):
@@ -52,6 +58,8 @@ class PerceptionPipeline(object):
         self.det_interval = float(self.cfg.get("detection_interval_s", 0.20))
         self.enable_depth = bool(self.cfg.get("enable_depth", True))
         self.enable_det = bool(self.cfg.get("enable_detection", True))
+        self._last_bins = []
+        self._last_front = None
 
     def start(self):
         if self._thread is not None:
@@ -84,6 +92,8 @@ class PerceptionPipeline(object):
                 depth = self.depth.estimate(small)
                 self._last_depth = now
                 ran = True
+                self._last_bins = depth.get("bins") or []
+                self._last_front = depth.get("front_m")
                 self.world.update_obstacles(
                     depth["front_m"], depth["bins"], depth["blocked"],
                     depth["direction"], depth["confidence"], depth["source"],
@@ -109,6 +119,7 @@ class PerceptionPipeline(object):
                 new_ids = []
                 for tr in tracks:
                     obj = TrackedObject(tr.id, tr.cls, tr.bbox, tr.confidence, track_id=tr.id)
+                    obj.position = self._range_for_bbox(tr.bbox)
                     is_new = self.world.upsert_object(obj)
                     if is_new:
                         new_ids.append(tr.id)
@@ -132,6 +143,25 @@ class PerceptionPipeline(object):
             self.overlay_buffer.put(overlay, now)
             if not ran:
                 time.sleep(0.005)
+
+    def _range_for_bbox(self, bbox):
+        if not bbox:
+            return None
+        cx = (float(bbox[0]) + float(bbox[2])) * 0.5
+        bins = self._last_bins
+        if bins:
+            idx = int(cx * len(bins))
+            if idx < 0:
+                idx = 0
+            if idx >= len(bins):
+                idx = len(bins) - 1
+            occ = float(bins[idx])
+            z = self.depth._occupancy_to_m(occ)
+        elif self._last_front is not None:
+            z = float(self._last_front)
+        else:
+            return None
+        return [round(cx - 0.5, 2), 0.0, round(float(z), 2)]
 
 
 def _draw_box(image, track):

@@ -34,6 +34,7 @@ DEFAULTS = {
         "min_command": 0.05,
     },
     "servo": {
+        "enabled": False,
         "i2c_bus": 1,
         "address": 64,
         "pan_channel": 0,
@@ -46,8 +47,9 @@ DEFAULTS = {
         "center_tilt": 0,
     },
     "safety": {
-        "min_obstacle_m": 0.38,
-        "slow_obstacle_m": 0.70,
+        "min_obstacle_m": 0.18,
+        "slow_obstacle_m": 0.36,
+        "turn_obstacle_m": 0.06,
         "max_speed": 0.25,
         "max_turn": 0.35,
         "stale_perception_s": 0.90,
@@ -72,18 +74,20 @@ DEFAULTS = {
         "cruise_speed": 0.18,
         "bins": 5,
         "blocked_bins_center": 0.35,
+        "recovery_s": 2.0,
     },
     "llm": {
         "base_url": "http://192.168.20.150:8008/v1",
         "model": "gemma-4-E4B-it-Q4_K_M",
-        "timeout_s": 25,
-        "max_tokens": 280,
+        "timeout_s": 30,
+        "max_tokens": 400,
         "temperature": 0.2,
         "min_reason_interval_s": 6.0,
+        "enable_thinking": False,
     },
     "whisper": {
         "base_url": "http://192.168.20.150:8003",
-        "timeout_s": 45,
+        "timeout_s": 90,
     },
     "typesafe": {
         "enabled": True,

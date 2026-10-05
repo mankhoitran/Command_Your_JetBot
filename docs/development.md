@@ -33,7 +33,15 @@ E-STOP is the red button and `POST /api/estop`. It does not wait for the LLM.
 | `OPENROUTER_API_KEY` | OpenRouter key for Jev (`~typesafe/jev-latest`) |
 | `TYPESAFE_API_KEY` | alias of OpenRouter key (legacy name) |
 | `JETBOT_SIMULATE` | force simulate-if-missing |
-| `JETBOT_ALLOW_MOTION` | `1` to unlock wheels (default locked while charging) |
+| `JETBOT_ALLOW_MOTION` | `1` to unlock wheels on boot (default locked while charging) |
+
+`config.yaml` `servo.enabled` is **false**. The CSI camera is bolted to the
+chassis. Leave it false until a PCA9685 pan/tilt is on the bus, then set
+`enabled: true` and confirm health shows `pca9685` (not simulated pan).
+
+Runtime unlock without restart: console **UNLOCK WHEELS**, click the
+MOTION pill, or `POST /api/motion` with `{"allow": true}`. Hold **MIC**
+on the command bar to talk; audio is sent to `/api/whisper`.
 
 Remote LLM and Whisper URLs must stay on `.150` unless you change the config on purpose.
 
@@ -65,5 +73,5 @@ Keep perception at 160×120. Do not add a second heavyweight network while
 the geometric depth + contour detector are running. TensorRT SSD is optional
 via `perception.ssd_engine` when an engine file exists.
 
-LLM max_tokens is 280 by design (2k context). Do not send images.
+LLM `max_tokens` is 400. Gemma-IT thinking is off (`enable_thinking: false`) so the JSON plan is not truncated. Do not send images.
 ---

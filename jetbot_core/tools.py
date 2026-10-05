@@ -8,18 +8,19 @@ import time
 
 from .events import EventType
 from .safety import MotionCommand
-from .task import ACTIVE_PERCEPTION, COMPLETED, EXECUTING, FAILED, OBSERVING
+from .task import COMPLETED, FAILED
 
 log = logging.getLogger("jetbot.tools")
 
-SCAN_POSES = [
-    ("forward", 0.35),
+# Body-yaw survey for a fixed chassis camera. Each tuple is (planner_mode, dwell_s).
+SCAN_BODY_STEPS = [
+    ("stop", 0.25),
     ("left", 0.45),
-    ("left_up", 0.35),
-    ("forward", 0.25),
-    ("right", 0.45),
-    ("right_up", 0.35),
-    ("forward", 0.4),
+    ("stop", 0.35),
+    ("right", 0.90),
+    ("stop", 0.35),
+    ("left", 0.45),
+    ("stop", 0.30),
 ]
 
 
@@ -35,10 +36,15 @@ class ToolRouter(object):
         self._scan_lock = threading.Lock()
         self._scanning = False
         self.last_say = ""
+        self.servo_enabled = bool(getattr(servo, "enabled", False))
 
     def dispatch(self, name, args=None):
         args = args or {}
         name = str(name).strip()
+        if self.world.obstacles_view()["robot"]["estop"] and name not in ("motion.stop", "task.fail", "task.complete"):
+            return {"ok": False, "tool": name, "error": "estop"}
+        if name.startswith("motion.") and name != "motion.stop" and self.planner.in_recovery():
+            return {"ok": False, "tool": name, "error": "recovery_active"}
         handler = {
             "motion.forward": self._forward,
             "motion.backward": self._backward,
@@ -84,49 +90,65 @@ class ToolRouter(object):
             d = 4.0
         return d
 
+    def _named_task(self):
+        snap = self.tasks.snapshot()
+        return bool(snap.get("id")) and snap.get("state") not in ("IDLE", None)
+
+    def _note(self, action, progress=None):
+        if self._named_task():
+            self.tasks.ensure_executing(action=action, progress=progress)
+        else:
+            self.tasks.note_action(action, progress=progress)
+
     def _forward(self, args):
         d = self._duration(args, 1.0)
         self.planner.set_mode("forward", duration_s=d)
-        self.tasks.ensure_executing(action="forward", progress=0.4)
+        self._note("forward", progress=0.4)
         return {"ok": True, "duration": d}
 
     def _backward(self, args):
         d = self._duration(args, 0.6)
         self.planner.set_mode("backup", duration_s=d)
-        self.tasks.ensure_executing(action="backup")
+        self._note("backup")
         return {"ok": True, "duration": d}
 
     def _left(self, args):
         d = self._duration(args, 0.5)
         self.planner.set_mode("left", duration_s=d)
-        self.tasks.ensure_executing(action="left")
+        self._note("left")
         return {"ok": True, "duration": d}
 
     def _right(self, args):
         d = self._duration(args, 0.5)
         self.planner.set_mode("right", duration_s=d)
-        self.tasks.ensure_executing(action="right")
+        self._note("right")
         return {"ok": True, "duration": d}
 
     def _stop(self, args):
         self.planner.halt()
         self.safety.request(MotionCommand(0, 0, "tool-stop", 0.1))
+        self.tasks.note_action("stop")
         return {"ok": True}
 
     def _explore(self, args):
         d = self._duration(args, 3.0)
         self.planner.set_mode("explore", duration_s=d)
-        self.tasks.ensure_executing(action="explore")
+        self._note("explore")
         return {"ok": True, "duration": d}
 
     def _look(self, pose):
-        pan, tilt = self.servo.look_named(pose)
-        self.world.update_robot(camera_pan=pan, camera_tilt=tilt)
-        try:
-            self.tasks.transition(ACTIVE_PERCEPTION, action="look_" + pose)
-        except ValueError:
-            pass
-        return {"ok": True, "pan": pan, "tilt": tilt}
+        self.planner.halt()
+        if self.servo_enabled:
+            pan, tilt = self.servo.look_named(pose)
+            self.world.update_robot(camera_pan=pan, camera_tilt=tilt)
+            return {"ok": True, "pan": pan, "tilt": tilt, "camera": "gimbal"}
+        # Fixed camera: left/right become a short body yaw. Up/down/forward are no-ops.
+        if pose in ("left", "right"):
+            self.planner.set_mode(pose, duration_s=0.4)
+            self._note("look_" + pose)
+            return {"ok": True, "camera": "fixed", "body_yaw": pose, "pan": 0.0, "tilt": 0.0}
+        self.world.update_robot(camera_pan=0.0, camera_tilt=0.0)
+        return {"ok": True, "camera": "fixed", "note": "no gimbal", "pan": 0.0, "tilt": 0.0}
 
     def _scan(self, args):
         if not self._scan_lock.acquire(False):
@@ -140,46 +162,80 @@ class ToolRouter(object):
         thread = threading.Thread(target=self._scan_worker, name="scan")
         thread.daemon = True
         thread.start()
-        return {"ok": True, "started": True}
+        return {"ok": True, "started": True, "camera": "fixed" if not self.servo_enabled else "gimbal"}
 
     def _scan_worker(self):
-        self.bus.emit(EventType.SCAN_REQUESTED, "camera", {})
-        try:
-            self.tasks.transition(ACTIVE_PERCEPTION, action="scan")
-        except ValueError:
-            pass
+        self.bus.emit(EventType.SCAN_REQUESTED, "camera", {"fixed": not self.servo_enabled})
+        self.planner.halt()
         seen = []
         try:
-            for pose, dwell in SCAN_POSES:
-                if self.world.snapshot()["robot"]["estop"]:
-                    break
-                pan, tilt = self.servo.look_named(pose)
-                self.world.update_robot(camera_pan=pan, camera_tilt=tilt)
-                time.sleep(dwell)
-                snap = self.world.snapshot()
-                for obj in snap.get("objects", {}).values():
-                    seen.append("%s:%s" % (obj.get("id"), obj.get("class")))
-            self.servo.look_named("forward")
+            if self.world.snapshot()["robot"]["estop"]:
+                return
+            allow = True
+            try:
+                allow = bool(self.safety.allow_motion)
+            except Exception:
+                allow = True
+            if self.servo_enabled:
+                self._scan_gimbal(seen)
+            elif allow:
+                self._scan_body(seen)
+            else:
+                time.sleep(0.4)
+                self._collect_seen(seen)
             self.world.update_robot(camera_pan=0.0, camera_tilt=0.0)
             content = "Room scan: %s" % (", ".join(seen[:12]) if seen else "no distinct objects")
             self.memory.add_note(
                 content, reason="scan_complete", tags=["scan"],
-                context="initial or active perception scan", source="scan", confidence=0.55,
+                context="fixed camera survey" if not self.servo_enabled else "gimbal scan",
+                source="scan", confidence=0.55,
             )
-            self.bus.emit(EventType.SCAN_COMPLETED, "camera", {"objects": seen[:12]})
-            try:
-                self.tasks.transition(OBSERVING, action="scan_done", progress=0.3)
-            except ValueError:
-                pass
+            self.bus.emit(EventType.SCAN_COMPLETED, "camera", {"objects": seen[:12], "fixed": not self.servo_enabled})
         finally:
+            self.planner.halt()
             self._scanning = False
+
+    def _scan_gimbal(self, seen):
+        from .hardware.servo import LOOK_PRESETS
+        poses = ("forward", "left", "left_up", "forward", "right", "right_up", "forward")
+        dwells = (0.35, 0.45, 0.35, 0.25, 0.45, 0.35, 0.4)
+        for pose, dwell in zip(poses, dwells):
+            if self.world.snapshot()["robot"]["estop"]:
+                break
+            if pose in LOOK_PRESETS:
+                pan, tilt = self.servo.look_named(pose)
+                self.world.update_robot(camera_pan=pan, camera_tilt=tilt)
+            time.sleep(dwell)
+            self._collect_seen(seen)
+        self.servo.look_named("forward")
+
+    def _scan_body(self, seen):
+        for mode, dwell in SCAN_BODY_STEPS:
+            if self.world.snapshot()["robot"]["estop"]:
+                break
+            if self.planner.in_recovery() and mode in ("left", "right"):
+                self.planner.halt()
+                time.sleep(dwell)
+                self._collect_seen(seen)
+                continue
+            self.planner.set_mode(mode, duration_s=dwell)
+            time.sleep(dwell)
+            self._collect_seen(seen)
+        self.planner.halt()
+
+    def _collect_seen(self, seen):
+        snap = self.world.snapshot()
+        for obj in snap.get("objects", {}).values():
+            bit = "%s:%s" % (obj.get("id"), obj.get("class"))
+            if bit not in seen:
+                seen.append(bit)
 
     def _inspect(self, args):
         target = args.get("target") or args.get("object")
-        # Look slightly toward the object's last bbox center if known.
+        self.planner.halt()
         snap = self.world.snapshot()
         obj = (snap.get("objects") or {}).get(target) if target else None
-        if obj:
+        if self.servo_enabled and obj:
             x0, y0, x1, y1 = obj["bbox"]
             cx = (x0 + x1) * 0.5
             cy = (y0 + y1) * 0.5
@@ -187,26 +243,35 @@ class ToolRouter(object):
             tilt = (0.5 - cy) * 30.0
             self.servo.look(pan, tilt)
             self.world.update_robot(camera_pan=pan, camera_tilt=tilt)
-        else:
-            self._look("forward")
-        try:
-            self.tasks.transition(ACTIVE_PERCEPTION, action="inspect")
-        except ValueError:
-            pass
-        return {"ok": True, "target": target}
+            return {"ok": True, "target": target, "camera": "gimbal"}
+        if obj:
+            x0, y0, x1, y1 = obj["bbox"]
+            cx = (x0 + x1) * 0.5
+            if cx < 0.4:
+                self.planner.set_mode("left", duration_s=0.35)
+            elif cx > 0.6:
+                self.planner.set_mode("right", duration_s=0.35)
+            self._note("inspect")
+            return {"ok": True, "target": target, "camera": "fixed", "body_yaw": True}
+        return {"ok": True, "target": target, "camera": "fixed", "note": "no gimbal"}
 
     def _go_to(self, args):
         target = args.get("target") or args.get("name")
-        self.planner.set_mode("explore", duration_s=2.5, target=target)
-        self.world.set_navigation(current_target=target, mode="explore")
-        self.tasks.ensure_executing(action="go_to")
-        return {"ok": True, "target": target, "note": "local explore toward target; no metric map"}
+        objs = self.world.objects_view()
+        if target and target in objs:
+            self.planner.set_mode("follow", duration_s=4.0, target=target)
+            self.world.set_navigation(current_target=target, mode="follow")
+            self._note("follow")
+            return {"ok": True, "target": target, "mode": "follow"}
+        self.planner.halt()
+        self._scan({})
+        return {"ok": False, "target": target, "error": "unknown_target"}
 
     def _follow(self, args):
         target = args.get("target")
         self.planner.set_mode("follow", duration_s=4.0, target=target)
         self.world.set_navigation(current_target=target, mode="follow")
-        self.tasks.ensure_executing(action="follow")
+        self._note("follow")
         return {"ok": True, "target": target}
 
     def _remember(self, args):

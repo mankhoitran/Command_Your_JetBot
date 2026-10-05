@@ -72,9 +72,9 @@ class HealthMonitor(object):
             status.update(extra)
         self.world.set_health(name, status)
 
-    def snapshot(self):
-        host = host_telemetry()
+    def snapshot(self, host_metrics=None):
+        host = host_metrics if host_metrics is not None else host_telemetry()
         self.world.set_health("host", {"online": True, "detail": "ok", "ts": time.time()})
-        data = dict(self.world.snapshot().get("health") or {})
+        data = self.world.health_dict()
         data["host_metrics"] = host
         return data

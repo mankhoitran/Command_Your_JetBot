@@ -236,7 +236,7 @@ def _try_import_jetbot_robot():
         if os.path.isdir(os.path.join(root, "jetbot")) and root not in sys.path:
             sys.path.insert(0, root)
     try:
-        from jetbot.robot import Robot
+        from jetbot import Robot
         return Robot
     except Exception as exc:
         log.info("jetbot.Robot unavailable: %s", exc)

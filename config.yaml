@@ -33,6 +33,9 @@ motors:
   min_command: 0.05
 
 servo:
+  # Camera is bolted to the chassis. No pan/tilt board on this robot.
+  # Set enabled: true only when a PCA9685 is actually on the bus.
+  enabled: false
   i2c_bus: 1
   address: 64          # 0x40 PCA9685
   pan_channel: 0
@@ -45,8 +48,11 @@ servo:
   center_tilt: 0
 
 safety:
-  min_obstacle_m: 0.38
-  slow_obstacle_m: 0.70
+  # Forward stop. Geometric depth is a heuristic, so keep this modest.
+  min_obstacle_m: 0.18
+  slow_obstacle_m: 0.36
+  # In-place left/right barely translate; only halt a spin if nearly touching.
+  turn_obstacle_m: 0.06
   max_speed: 0.25
   max_turn: 0.35
   stale_perception_s: 0.90
@@ -71,18 +77,21 @@ navigation:
   cruise_speed: 0.18
   bins: 5
   blocked_bins_center: 0.35
+  recovery_s: 2.0
 
 llm:
   base_url: http://192.168.20.150:8008/v1
   model: gemma-4-E4B-it-Q4_K_M
-  timeout_s: 25
-  max_tokens: 280
+  timeout_s: 30
+  max_tokens: 400
   temperature: 0.2
   min_reason_interval_s: 6.0
+  # Gemma-IT thinking burns the token budget and truncates the JSON plan.
+  enable_thinking: false
 
 whisper:
   base_url: http://192.168.20.150:8003
-  timeout_s: 45
+  timeout_s: 90
 
 typesafe:
   enabled: true

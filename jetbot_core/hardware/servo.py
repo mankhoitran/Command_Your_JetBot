@@ -29,6 +29,8 @@ def _clamp(value, lo, hi):
 
 
 class ServoController(object):
+    enabled = False
+
     def look(self, pan_deg, tilt_deg):
         raise NotImplementedError
 
@@ -43,10 +45,36 @@ class ServoController(object):
         self.look(0.0, 0.0)
 
     def snapshot(self):
-        return {"backend": "interface", "pan": 0.0, "tilt": 0.0, "ok": False}
+        return {"backend": "interface", "pan": 0.0, "tilt": 0.0, "ok": False, "enabled": False}
 
     def close(self):
         pass
+
+
+class FixedServo(ServoController):
+    """Bolted camera. look() is a no-op so tools cannot fake pan/tilt."""
+
+    def __init__(self):
+        self.enabled = False
+        self.pan = 0.0
+        self.tilt = 0.0
+
+    def look(self, pan_deg, tilt_deg):
+        return 0.0, 0.0
+
+    def look_named(self, name):
+        if name not in LOOK_PRESETS:
+            raise ValueError("unknown look pose: %s" % name)
+        return 0.0, 0.0
+
+    def snapshot(self):
+        return {
+            "backend": "fixed",
+            "pan": 0.0,
+            "tilt": 0.0,
+            "ok": True,
+            "enabled": False,
+        }
 
 
 class SimulatedServo(ServoController):
@@ -57,6 +85,7 @@ class SimulatedServo(ServoController):
         self.tilt_max = tilt_max
         self.pan = 0.0
         self.tilt = 0.0
+        self.enabled = True
         self._lock = threading.Lock()
 
     def look(self, pan_deg, tilt_deg):
@@ -71,6 +100,7 @@ class SimulatedServo(ServoController):
                 "pan": self.pan,
                 "tilt": self.tilt,
                 "ok": True,
+                "enabled": True,
             }
 
 
@@ -91,6 +121,7 @@ class PCA9685Servo(ServoController):
         self.tilt_ch = tilt_ch
         self.pan = 0.0
         self.tilt = 0.0
+        self.enabled = True
         self._lock = threading.Lock()
         self._pwm = None
         try:
@@ -128,11 +159,14 @@ class PCA9685Servo(ServoController):
 
     def snapshot(self):
         with self._lock:
-            return {"backend": "pca9685", "pan": self.pan, "tilt": self.tilt, "ok": True}
+            return {"backend": "pca9685", "pan": self.pan, "tilt": self.tilt, "ok": True, "enabled": True}
 
 
 def try_create_servo(cfg):
     servo_cfg = cfg.get("servo", {})
+    if not bool(servo_cfg.get("enabled", False)):
+        log.info("Camera servo disabled (fixed chassis camera)")
+        return FixedServo(), "fixed"
     simulate = cfg.get("robot", {}).get("simulate_if_missing", True)
     bus = int(servo_cfg.get("i2c_bus", 1))
     address = int(servo_cfg.get("address", 0x40))

@@ -12,7 +12,7 @@ except ImportError:
 
 
 DEFAULTS = {
-    "robot": {"name": "jetbot-nano", "simulate_if_missing": True},
+    "robot": {"name": "jetbot-nano", "simulate_if_missing": True, "allow_motion": False},
     "web": {"host": "0.0.0.0", "port": 8080, "jpeg_quality": 60, "mjpeg_fps": 12},
     "camera": {
         "width": 320,
@@ -34,6 +34,7 @@ DEFAULTS = {
         "min_command": 0.05,
     },
     "servo": {
+        "enabled": False,
         "i2c_bus": 1,
         "address": 64,
         "pan_channel": 0,
@@ -46,8 +47,9 @@ DEFAULTS = {
         "center_tilt": 0,
     },
     "safety": {
-        "min_obstacle_m": 0.38,
-        "slow_obstacle_m": 0.70,
+        "min_obstacle_m": 0.18,
+        "slow_obstacle_m": 0.36,
+        "turn_obstacle_m": 0.06,
         "max_speed": 0.25,
         "max_turn": 0.35,
         "stale_perception_s": 0.90,
@@ -72,23 +74,25 @@ DEFAULTS = {
         "cruise_speed": 0.18,
         "bins": 5,
         "blocked_bins_center": 0.35,
+        "recovery_s": 2.0,
     },
     "llm": {
         "base_url": "http://192.168.20.150:8008/v1",
         "model": "gemma-4-E4B-it-Q4_K_M",
-        "timeout_s": 25,
-        "max_tokens": 280,
+        "timeout_s": 30,
+        "max_tokens": 400,
         "temperature": 0.2,
         "min_reason_interval_s": 6.0,
+        "enable_thinking": False,
     },
     "whisper": {
         "base_url": "http://192.168.20.150:8003",
-        "timeout_s": 45,
+        "timeout_s": 90,
     },
     "typesafe": {
-        "enabled": False,
-        "api_url": "https://api.typesafe.ai/v1/systemone",
-        "model": "jev-latest",
+        "enabled": True,
+        "api_url": "https://openrouter.ai/api/alpha/decisions",
+        "model": "~typesafe/jev-latest",
         "timeout_s": 8,
         "api_key": "",
     },
@@ -112,8 +116,10 @@ _ENV_MAP = {
     "JETBOT_LLM_MODEL": ("llm", "model", str),
     "JETBOT_WHISPER_URL": ("whisper", "base_url", str),
     "TYPESAFE_API_KEY": ("typesafe", "api_key", str),
+    "OPENROUTER_API_KEY": ("typesafe", "api_key", str),
     "TYPESAFE_ENABLED": ("typesafe", "enabled", lambda v: str(v).lower() in ("1", "true", "yes")),
     "JETBOT_SIMULATE": ("robot", "simulate_if_missing", lambda v: str(v).lower() in ("1", "true", "yes")),
+    "JETBOT_ALLOW_MOTION": ("robot", "allow_motion", lambda v: str(v).lower() in ("1", "true", "yes")),
 }
 
 
@@ -139,12 +145,34 @@ def _load_yaml(path):
     return data
 
 
+def _load_dotenv(path):
+    """Load KEY=VALUE lines into os.environ without overriding existing vars."""
+    if not path or not os.path.isfile(path):
+        return
+    try:
+        with open(path, "r") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception:
+        pass
+
+
 def load_config(path=None):
     """Return a nested dict. `path` defaults to CYJ/config.yaml."""
     cfg = copy.deepcopy(DEFAULTS)
     if path is None:
         here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         path = os.path.join(here, "config.yaml")
+    else:
+        here = os.path.dirname(os.path.abspath(path))
+    _load_dotenv(os.path.join(here, ".env"))
     _deep_update(cfg, _load_yaml(path))
     for env_name, spec in _ENV_MAP.items():
         if env_name not in os.environ:

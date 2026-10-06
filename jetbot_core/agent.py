@@ -26,9 +26,23 @@ INTENT_TOOLS = {
     "status": [],
 }
 
+_LLM_NEEDLES = (
+    "replan", "path blocked", "do not ram",
+    "tell me", "do you see", "what do you see",
+    "look for", "find a", "find the",
+)
+
+
+def _needs_llm(text):
+    """True when a cheap local/Jev intent would swallow a command that needs a plan."""
+    if not text:
+        return False
+    return any(needle in text for needle in _LLM_NEEDLES)
+
 
 class Agent(object):
-    def __init__(self, cfg, world, bus, llm, tools, tasks, memory, typesafe, health):
+    def __init__(self, cfg, world, bus, llm, tools, tasks, memory, typesafe, health,
+                 safety=None, planner=None, spatial=None):
         self.cfg = cfg
         self.world = world
         self.bus = bus
@@ -38,11 +52,15 @@ class Agent(object):
         self.memory = memory
         self.typesafe = typesafe
         self.health = health
+        self.safety = safety
+        self.planner = planner
+        self.spatial = spatial
         self.min_reason_s = float(cfg.get("llm", {}).get("min_reason_interval_s", 6.0))
         self._lock = threading.Lock()
         self._pending = []
         self._last_reason = 0.0
         self._busy = False
+        self._abort = False
         self.last_plan = None
         self.last_say = "idle"
         self.decisions = []
@@ -50,9 +68,13 @@ class Agent(object):
         self._thread = None
         self.hz = float(cfg.get("loops", {}).get("agent_hz", 4))
         bus.subscribe(EventType.NAVIGATION_BLOCKED, self._on_blocked)
+        bus.subscribe(EventType.NAVIGATION_RECOVERY_FAILED, self._on_recovery_failed)
+        bus.subscribe(EventType.NAVIGATION_RECOVERED, self._on_recovered)
         bus.subscribe(EventType.VOICE_TRANSCRIPT, self._on_voice)
         bus.subscribe(EventType.USER_COMMAND, self._on_user)
         bus.subscribe(EventType.EMERGENCY_STOP, self._on_estop)
+        bus.subscribe(EventType.SCAN_COMPLETED, self._on_scan_done)
+        bus.subscribe(EventType.OBJECT_DETECTED, self._on_object)
 
     def start(self):
         if self._thread is not None:
@@ -88,6 +110,7 @@ class Agent(object):
     def _on_estop(self, event):
         with self._lock:
             self._pending = []
+            self._abort = True
         try:
             if self.tasks.state not in (IDLE, COMPLETED, FAILED):
                 self.tasks.cancel("estop")
@@ -95,14 +118,65 @@ class Agent(object):
             pass
         self.last_say = "emergency stop"
 
+    def _named_task(self):
+        return self.tasks.state not in (IDLE, COMPLETED, FAILED, CANCELLED) and bool(self.tasks.task_id)
+
     def _on_blocked(self, event):
-        # Deterministic local recovery is already running. Ask LLM only if a task is active.
+        # Local recovery is already running. Do not enqueue an LLM replan yet.
+        if not self._named_task():
+            return
         if self.tasks.state in (EXECUTING, OBSERVING):
             try:
                 self.tasks.transition(REPLANNING, action="blocked")
             except ValueError:
                 pass
-            self.submit("Path blocked. Replan using current world state. Do not ram the obstacle.", source="nav")
+
+    def _on_recovery_failed(self, event):
+        if not self._named_task():
+            return
+        try:
+            if self.tasks.state not in (REPLANNING,):
+                self.tasks.transition(REPLANNING, action="recovery_failed")
+        except ValueError:
+            pass
+        self.submit(
+            "Path blocked. Recovery failed. Replan using current world state. Do not ram the obstacle.",
+            source="nav",
+        )
+
+    def _on_recovered(self, event):
+        if self.tasks.state == REPLANNING:
+            try:
+                self.tasks.transition(EXECUTING, action="recovered")
+            except ValueError:
+                pass
+
+    def _on_scan_done(self, event):
+        if self.tasks.state == ACTIVE_PERCEPTION:
+            try:
+                self.tasks.transition(OBSERVING, action="scan_done", progress=0.3)
+            except ValueError:
+                pass
+
+    def _on_object(self, event):
+        if self.spatial is None:
+            return
+        ids = (event.payload or {}).get("ids") or []
+        objs = self.world.objects_view()
+        for oid in ids:
+            obj = objs.get(oid)
+            if obj:
+                self.spatial.remember_landmark(
+                    obj.get("id"), obj.get("class"), obj.get("position"),
+                    obj.get("confidence", 0.5), source="perception",
+                )
+
+    def _aborted(self):
+        if self._abort:
+            return True
+        if self.safety is not None and self.safety.estop:
+            return True
+        return False
 
     def _loop(self):
         period = 1.0 / max(1.0, self.hz)
@@ -121,7 +195,13 @@ class Agent(object):
     def _handle(self, item):
         self._busy = True
         text = item["text"]
+        user_source = item.get("source")
+        if user_source != "nav":
+            self._abort = False
         try:
+            if self._aborted():
+                self.last_say = "emergency stop"
+                return
             if self.tasks.state in (IDLE, COMPLETED, FAILED, CANCELLED):
                 self.tasks.start(text[:80], goal=text)
             else:
@@ -130,10 +210,11 @@ class Agent(object):
                 except ValueError:
                     pass
 
-            # Cheap local intents (and TypeSafe if configured) avoid LLM round-trips.
-            local = self._local_intent(text)
+            local = self._local_intent(text, source=user_source)
             if local is not None:
                 intent, conf = local
+                if self._aborted():
+                    return
                 if intent == "status":
                     self.last_say = self.world.summary_for_llm()[:240]
                     self._record("local", intent, self.last_say, [])
@@ -152,7 +233,11 @@ class Agent(object):
                         pass
                     return
                 tools = INTENT_TOOLS.get(intent) or []
-                results = [self.tools.dispatch(n, a) for n, a in tools]
+                results = []
+                for n, a in tools:
+                    if self._aborted():
+                        break
+                    results.append(self.tools.dispatch(n, a))
                 self.last_say = "OK: %s" % intent
                 self._record("local", intent, self.last_say, [{"name": n, "args": a} for n, a in tools], results)
                 return
@@ -160,11 +245,18 @@ class Agent(object):
             now = time.time()
             if now - self._last_reason < self.min_reason_s:
                 time.sleep(max(0.0, self.min_reason_s - (now - self._last_reason)))
+            if self._aborted():
+                return
 
             world_s = self.world.summary_for_llm()
+            if self.spatial is not None:
+                world_s = world_s + "\n" + self.spatial.summary()
             mem_s = self.memory.summary_for_llm(text)
             plan, err = self.llm.plan(text, world_s, mem_s)
             self._last_reason = time.time()
+            if self._aborted():
+                self.last_say = "emergency stop"
+                return
             if plan is None:
                 self.bus.emit(EventType.LLM_UNAVAILABLE, "llm", {"error": err})
                 self.health.set("llm", False, err or "unavailable")
@@ -177,11 +269,17 @@ class Agent(object):
                     pass
                 return
             self.health.set("llm", True, "ok", extra={"latency_s": self.llm.last_latency_s})
+            plan = self._ensure_usable_plan(plan, text)
             self.last_plan = plan
             self.last_say = plan.get("say") or ""
             results = []
             for tool in plan.get("tools") or []:
+                if self._aborted():
+                    break
                 results.append(self.tools.dispatch(tool.get("name"), tool.get("args") or {}))
+            if self._aborted():
+                self.last_say = "emergency stop"
+                return
             if plan.get("failed"):
                 try:
                     self.tasks.transition(FAILED, action="plan", failure=plan.get("reason"))
@@ -212,15 +310,8 @@ class Agent(object):
         finally:
             self._busy = False
 
-    def _local_intent(self, text):
-        ts = None
-        if self.typesafe is not None:
-            ts = self.typesafe.classify_intent(text)
-        if ts and ts.get("intent") and ts.get("confidence", 0) >= 0.72 and ts.get("intent") != "unknown":
-            if ts.get("needs_confirm", 0) >= 0.7:
-                return None
-            return ts["intent"], ts["confidence"]
-        t = text.strip().lower()
+    def _keyword_intent(self, text):
+        t = (text or "").strip().lower()
         mapping = [
             (("stop", "halt", "freeze", "estop", "e-stop"), "stop"),
             (("look around", "scan", "survey", "inspect room"), "scan"),
@@ -238,6 +329,22 @@ class Agent(object):
                     return intent, 0.9
         return None
 
+    def _local_intent(self, text, source=""):
+        t = (text or "").strip().lower()
+        if source in ("nav",) or _needs_llm(t):
+            return None
+        hit = self._keyword_intent(text)
+        if hit is not None:
+            return hit
+        ts = None
+        if self.typesafe is not None:
+            ts = self.typesafe.classify_intent(text)
+        if ts and ts.get("intent") and ts.get("confidence", 0) >= 0.72 and ts.get("intent") != "unknown":
+            if ts.get("needs_confirm", 0) >= 0.7:
+                return None
+            return ts["intent"], ts["confidence"]
+        return None
+
     def _record(self, kind, intent, say, tools, results=None, reason=""):
         entry = {
             "t": time.time(),
@@ -253,6 +360,34 @@ class Agent(object):
             self.decisions = self.decisions[-40:]
         self.tools.last_say = say
 
+    def _ensure_usable_plan(self, plan, text):
+        """If Gemma truncated JSON, still emit a concrete tool decision."""
+        plan = dict(plan or {})
+        tools = plan.get("tools") or []
+        say = (plan.get("say") or "").strip()
+        bad_parse = plan.get("reason") in ("unstructured", "json parse failed", "empty llm")
+        if say.startswith("{") or say == "I could not parse a plan.":
+            bad_parse = True
+        if tools and not say.startswith("{"):
+            return plan
+        blocked = False
+        try:
+            blocked = bool((self.world.obstacles_view().get("obstacles") or {}).get("blocked"))
+        except Exception:
+            blocked = False
+        if blocked or "block" in (text or "").lower():
+            plan["tools"] = [{"name": "camera.scan_environment", "args": {}}]
+            if bad_parse or not say or say.startswith("{"):
+                plan["say"] = "Path blocked; scanning for a way around."
+            plan["reason"] = plan.get("reason") or "fallback scan"
+            return plan
+        if bad_parse and not tools:
+            plan["tools"] = [{"name": "camera.scan_environment", "args": {}}]
+            if not say or say.startswith("{") or say == "I could not parse a plan.":
+                plan["say"] = "I could not finish a plan; scanning the room."
+            plan["reason"] = plan.get("reason") or "fallback scan"
+        return plan
+
     def snapshot(self):
         return {
             "say": self.last_say,
@@ -260,5 +395,4 @@ class Agent(object):
             "pending": len(self._pending),
             "last_plan": self.last_plan,
             "decisions": list(self.decisions[-8:]),
-            "task": self.tasks.snapshot(),
         }

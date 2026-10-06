@@ -19,6 +19,7 @@
       <span class="pill" id="conn-pill">CONNECTING</span>
       <span class="pill" id="estop-pill">E-STOP CLEAR</span>
       <span class="pill" id="task-pill">IDLE</span>
+      <span class="pill" id="motion-pill">MOTION LOCKED</span>
       <span class="mono" id="uptime">up 0s</span>
     </div>
     <button class="estop" id="btn-estop" type="button">STOP</button>
@@ -32,7 +33,7 @@
           <span id="cam-backend">—</span>
           <span id="cam-fps">0 fps</span>
           <span id="cam-lat">0 ms</span>
-          <span id="cam-pose">pan 0° · tilt 0°</span>
+          <span id="cam-pose">camera fixed</span>
         </div>
       </div>
       <div class="stage">
@@ -44,9 +45,9 @@
       </div>
       <div class="pad">
         <div class="pad-row">
-          <button data-act="look_up">CAM ▲</button>
+          <button data-act="look_up" title="No gimbal; camera is fixed">CAM ▲</button>
           <button data-act="forward">▲ FWD</button>
-          <button data-act="look_down">CAM ▼</button>
+          <button data-act="look_down" title="No gimbal; camera is fixed">CAM ▼</button>
         </div>
         <div class="pad-row">
           <button data-act="left">◀ LEFT</button>
@@ -54,15 +55,18 @@
           <button data-act="right">RIGHT ▶</button>
         </div>
         <div class="pad-row">
-          <button data-act="look_left">LOOK ◀</button>
+          <button data-act="look_left" title="Body yaw left (fixed camera)">YAW ◀</button>
           <button data-act="backward">▼ BACK</button>
-          <button data-act="look_right">LOOK ▶</button>
+          <button data-act="look_right" title="Body yaw right (fixed camera)">YAW ▶</button>
         </div>
         <div class="pad-row">
           <button data-act="scan">SCAN</button>
           <button data-act="explore">EXPLORE</button>
-          <button data-act="look_forward">CENTER CAM</button>
+          <button data-act="look_forward" title="Camera is bolted forward">CAM FWD</button>
           <button id="btn-clear-estop" type="button">CLEAR E-STOP</button>
+        </div>
+        <div class="pad-row">
+          <button id="btn-motion" type="button">UNLOCK WHEELS</button>
         </div>
       </div>
     </section>
@@ -91,13 +95,14 @@
         <p class="say" id="agent-say">idle</p>
         <form id="cmd-form">
           <input id="cmd-text" autocomplete="off" placeholder="Tell the robot what to do…"/>
+          <button id="btn-mic" type="button" title="Hold to talk">MIC</button>
           <button type="submit">SEND</button>
         </form>
         <div class="voice">
           <label>Whisper audio
             <input id="audio-file" type="file" accept="audio/*,.wav,.mp3,.ogg"/>
           </label>
-          <span id="voice-status"></span>
+          <span id="voice-status">hold MIC to talk</span>
         </div>
         <ul class="decisions" id="decisions"></ul>
       </section>

@@ -92,6 +92,61 @@ class TaskManager(object):
         self.action = None
         self.progress = 0.0
 
+    def note_action(self, action, progress=None):
+        """Record a pad/tool action without forcing a lifecycle jump."""
+        with self._lock:
+            self.action = action
+            if progress is not None:
+                self.progress = float(progress)
+            self.updated_at = time.time()
+            self.world.set_task(
+                id=self.task_id, name=self.name, state=self.state,
+                action=self.action, progress=self.progress,
+                failure_reason=self.failure_reason,
+            )
+        return self.state
+
+    def ensure_executing(self, action=None, progress=None):
+        """Promote a named Agent task into EXECUTING. Pad/manual stays IDLE."""
+        with self._lock:
+            if self.state == IDLE and not self.task_id:
+                self.action = action
+                if progress is not None:
+                    self.progress = float(progress)
+                self.updated_at = time.time()
+                self.world.set_task(
+                    id=self.task_id, name=self.name, state=self.state,
+                    action=self.action, progress=self.progress,
+                    failure_reason=self.failure_reason,
+                )
+                return self.state
+            if self.state == IDLE:
+                self._set(PLANNING, action=action or "manual", progress=0.05)
+            if self.state != EXECUTING:
+                try:
+                    self._set(EXECUTING, action=action, progress=progress)
+                except ValueError:
+                    if action is not None:
+                        self.action = action
+                    self.updated_at = time.time()
+                    self.world.set_task(
+                        id=self.task_id, name=self.name, state=self.state,
+                        action=self.action, progress=self.progress,
+                        failure_reason=self.failure_reason,
+                    )
+                    return self.state
+            elif action is not None:
+                self.action = action
+                if progress is not None:
+                    self.progress = float(progress)
+                self.updated_at = time.time()
+                self.world.set_task(
+                    id=self.task_id, name=self.name, state=self.state,
+                    action=self.action, progress=self.progress,
+                    failure_reason=self.failure_reason,
+                )
+        return self.state
+
     def transition(self, state, action=None, progress=None, failure=None):
         with self._lock:
             self._set(state, action=action, progress=progress, failure=failure)

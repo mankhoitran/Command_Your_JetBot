@@ -47,9 +47,10 @@ class TrackedObject(object):
 class WorldState(object):
     """Thread-safe snapshot of the current operational world."""
 
-    def __init__(self, stale_s=0.9):
+    def __init__(self, stale_s=0.9, stop_m=0.18):
         self._lock = threading.RLock()
         self.stale_s = float(stale_s)
+        self.stop_m = float(stop_m)
         self.robot = {
             "pose": {"x": 0.0, "y": 0.0, "yaw": 0.0},
             "velocity": {"linear": 0.0, "angular": 0.0},
@@ -200,10 +201,14 @@ class WorldState(object):
 
     def update_obstacles(self, front_m, bins, blocked, direction, confidence, source):
         with self._lock:
+            if front_m is not None:
+                blocked = bool(blocked) or (float(front_m) <= self.stop_m)
+            else:
+                blocked = bool(blocked)
             self.obstacles = {
                 "front_m": front_m,
                 "bins": list(bins) if bins is not None else [],
-                "blocked": bool(blocked),
+                "blocked": blocked,
                 "direction": direction,
                 "confidence": float(confidence),
                 "source": source,
@@ -211,6 +216,40 @@ class WorldState(object):
             }
             self.perception["last_depth_ts"] = _now()
             self.updated_at = _now()
+
+    def obstacles_view(self):
+        """Cheap consistent read for the 20 Hz safety / 10 Hz planner loops."""
+        with self._lock:
+            obs = dict(self.obstacles)
+            obs["bins"] = list(self.obstacles.get("bins") or [])
+            last_cmd = self.navigation.get("last_command")
+            nav = {
+                "mode": self.navigation.get("mode"),
+                "current_target": self.navigation.get("current_target"),
+                "blocked": self.navigation.get("blocked"),
+                "last_command": dict(last_cmd) if isinstance(last_cmd, dict) else last_cmd,
+            }
+            robot = {
+                "estop": self.robot.get("estop"),
+                "camera_pan": self.robot.get("camera_pan", 0.0),
+                "camera_tilt": self.robot.get("camera_tilt", 0.0),
+            }
+            last_depth = self.perception.get("last_depth_ts") or 0.0
+        now = _now()
+        depth_age = now - last_depth if last_depth else 1e9
+        freshness = STALE if depth_age > self.stale_s else (
+            KNOWN if obs.get("front_m") is not None else UNKNOWN
+        )
+        return {
+            "obstacles": obs,
+            "navigation": nav,
+            "robot": robot,
+            "freshness": {"obstacles": freshness},
+        }
+
+    def objects_view(self):
+        with self._lock:
+            return dict((k, v.to_dict()) for k, v in self.objects.items())
 
     def upsert_object(self, obj):
         with self._lock:
@@ -266,6 +305,10 @@ class WorldState(object):
         with self._lock:
             self.health[name] = status
             self.updated_at = _now()
+
+    def health_dict(self):
+        with self._lock:
+            return copy.deepcopy(self.health)
 
     def set_uncertainty(self, items):
         with self._lock:

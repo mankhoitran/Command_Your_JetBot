@@ -74,12 +74,16 @@ button, input { font: inherit; color: inherit; }
 .pad { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .pad-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
 .pad-row:nth-child(-n+3) { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.pad button, form button, #btn-clear-estop {
+.pad button, form button, #btn-clear-estop, #btn-motion, #btn-mic {
   background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
   padding: 8px 6px; cursor: pointer; letter-spacing: 0.04em;
 }
-.pad button:hover, form button:hover { border-color: var(--accent); color: var(--accent); }
+.pad button:hover, form button:hover, #btn-motion:hover, #btn-mic:hover { border-color: var(--accent); color: var(--accent); }
 .pad button.warn { border-color: #5a4a22; color: var(--warn); }
+#btn-motion { letter-spacing: 0.08em; }
+#btn-motion.on { border-color: #245c38; color: var(--ok); }
+#btn-mic { min-width: 64px; }
+#btn-mic.rec { border-color: var(--estop); color: #fff; background: #5a1212; }
 .kv { display: grid; grid-template-columns: 110px 1fr; gap: 2px 8px; font: 12px var(--mono); }
 .kv b { color: var(--muted); font-weight: 500; }
 .health { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
@@ -109,7 +113,8 @@ button, input { font: inherit; color: inherit; }
 #cmd-form input {
   flex: 1; background: #0b1016; border: 1px solid var(--line); border-radius: 6px; padding: 8px;
 }
-.voice { margin-top: 8px; color: var(--muted); font-size: 11px; display: flex; gap: 8px; align-items: center; }
+.voice { margin-top: 8px; color: var(--muted); font-size: 11px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+#motion-pill { cursor: pointer; }
 .world {
   margin: 0; font: 11px/1.4 var(--mono); color: var(--muted);
   max-height: 260px; overflow: auto; white-space: pre-wrap;

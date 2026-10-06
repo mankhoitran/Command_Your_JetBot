@@ -20,10 +20,13 @@ class DepthBackend(object):
 
 
 class GeometricDepthEstimator(DepthBackend):
-    def __init__(self, bins=5, min_m=0.22, max_m=2.2):
+    def __init__(self, bins=5, min_m=0.05, max_m=2.2, blocked_m=0.18):
         self.bins = int(bins)
         self.min_m = float(min_m)
+        if self.min_m > float(blocked_m):
+            self.min_m = float(blocked_m)
         self.max_m = float(max_m)
+        self.blocked_m = float(blocked_m)
         self._fps = 0.0
         self._n = 0
         self._t0 = time.time()
@@ -61,9 +64,10 @@ class GeometricDepthEstimator(DepthBackend):
             occupancy.append(max(0.0, min(1.0, occ)))
         bins = occupancy
         center = bins[self.bins // 2] if bins else 0.0
-        # Map occupancy to meters (high occupancy = close).
-        front_m = self.max_m - center * (self.max_m - self.min_m)
-        blocked = center >= 0.55
+        # Map occupancy to meters. occ=0 → far, occ≈0.55 → stop distance,
+        # occ=1 → min_m. A typical near blob must be able to trip blocked.
+        front_m = self._occupancy_to_m(center)
+        blocked = front_m <= self.blocked_m
         # Direction of nearest mass
         idx = int(np.argmax(np.array(bins))) if bins else self.bins // 2
         names = ["far_left", "left", "front", "right", "far_right"]
@@ -95,6 +99,19 @@ class GeometricDepthEstimator(DepthBackend):
             "latency_ms": (time.time() - t0) * 1000.0,
             "fps": self._fps,
         }
+
+    def _occupancy_to_m(self, occ):
+        occ = max(0.0, min(1.0, float(occ)))
+        block_occ = 0.55
+        if occ <= 0.0:
+            return self.max_m
+        if occ >= 1.0:
+            return self.min_m
+        if occ <= block_occ:
+            t = occ / block_occ
+            return self.max_m + t * (self.blocked_m - self.max_m)
+        t = (occ - block_occ) / max(1e-6, 1.0 - block_occ)
+        return self.blocked_m + t * (self.min_m - self.blocked_m)
 
     def _vis(self, bgr, bins, front_m, blocked):
         vis = bgr.copy()

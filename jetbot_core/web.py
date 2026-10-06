@@ -134,6 +134,21 @@ class JetBotHandler(BaseHTTPRequestHandler):
             data = _parse_body(raw, ctype)
             result = self.runtime.handle_manual(data.get("action"), data)
             return self._send(200 if result.get("ok") else 400, _json_bytes(result))
+        if path == "/api/motion":
+            data = _parse_body(raw, ctype)
+            allowed = data.get("allow")
+            if allowed is None:
+                allowed = data.get("allow_motion")
+            if allowed is None:
+                action = str(data.get("action") or "").lower()
+                if action in ("unlock", "on", "true", "1"):
+                    allowed = True
+                elif action in ("lock", "off", "false", "0"):
+                    allowed = False
+            if allowed is None:
+                return self._send(400, _json_bytes({"ok": False, "error": "allow required"}))
+            result = self.runtime.set_allow_motion(bool(allowed), source="http")
+            return self._send(200, _json_bytes(result))
         if path == "/api/whisper":
             return self._whisper(raw, ctype)
         if path == "/api/scan":

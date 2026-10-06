@@ -20,6 +20,7 @@ from .memory import SemanticMemory
 from .navigation import LocalPlanner
 from .perception.pipeline import PerceptionPipeline
 from .safety import MotionCommand, SafetyController
+from .spatial import SpatialMemory
 from .task import TaskManager
 from .tools import ToolRouter
 from .typesafe_client import TypeSafeClient
@@ -36,7 +37,8 @@ class JetBotRuntime(object):
         self.cfg = cfg
         self.bus = EventBus(history=250)
         stale = float(cfg.get("safety", {}).get("stale_perception_s", 0.9))
-        self.world = WorldState(stale_s=stale)
+        stop_m = float(cfg.get("safety", {}).get("min_obstacle_m", 0.18))
+        self.world = WorldState(stale_s=stale, stop_m=stop_m)
         self.health = HealthMonitor(self.world)
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         mem_path = cfg.get("memory", {}).get("path", "data/amem.json")
@@ -48,6 +50,7 @@ class JetBotRuntime(object):
             retrieve_k=int(cfg.get("memory", {}).get("retrieve_k", 5)),
             bus=self.bus,
         )
+        self.spatial = SpatialMemory()
         self.motors, motors_backend = try_create_motors(cfg)
         self.servo, servo_backend = try_create_servo(cfg)
         self.overlay_buffer = LatestFrameBuffer()
@@ -73,6 +76,7 @@ class JetBotRuntime(object):
         self.agent = Agent(
             cfg, self.world, self.bus, self.llm, self.tools,
             self.tasks, self.memory, self.typesafe, self.health,
+            safety=self.safety, planner=self.planner, spatial=self.spatial,
         )
         self._stop = threading.Event()
         self._telem = None
@@ -89,8 +93,8 @@ class JetBotRuntime(object):
         self.health.set("llm", ok, detail)
         ok, detail = self.whisper.health()
         self.health.set("whisper", ok, detail)
-        ts_on = bool(self.typesafe.enabled and self.typesafe.api_key)
-        self.health.set("typesafe", ts_on, "enabled" if ts_on else "disabled")
+        ts_on, ts_detail = self.typesafe.health()
+        self.health.set("typesafe", ts_on, ts_detail)
         self.health.set("memory", True, "notes=%d" % len(self.memory.notes))
 
     def start(self):
@@ -133,7 +137,10 @@ class JetBotRuntime(object):
             host = host_telemetry()
             self.health.set("host", True, "ok", extra=host)
             servo = self.servo.snapshot()
-            self.world.update_robot(camera_pan=servo.get("pan", 0), camera_tilt=servo.get("tilt", 0))
+            if servo.get("enabled"):
+                self.world.update_robot(camera_pan=servo.get("pan", 0), camera_tilt=servo.get("tilt", 0))
+            else:
+                self.world.update_robot(camera_pan=0.0, camera_tilt=0.0)
             cam = self.camera.snapshot()
             self.health.set("camera", bool(cam.get("ok")), cam.get("backend", ""), extra={"fps": cam.get("fps")})
             time.sleep(period)
@@ -160,6 +167,7 @@ class JetBotRuntime(object):
             "agent": self.agent.snapshot(),
             "memory": self.memory.snapshot(),
             "estop": self.safety.estop,
+            "allow_motion": bool(self.safety.allow_motion),
         }
 
     def handle_manual(self, action, extra=None):
@@ -171,6 +179,10 @@ class JetBotRuntime(object):
         if action in ("clear_estop", "reset_estop"):
             self.safety.clear_estop(source="ui")
             return {"ok": True, "action": "clear_estop"}
+        if action in ("unlock", "allow_motion", "motion_on"):
+            return self.set_allow_motion(True, source="ui")
+        if action in ("lock", "deny_motion", "motion_off"):
+            return self.set_allow_motion(False, source="ui")
         if action == "stop":
             self.planner.halt()
             self.safety.request(MotionCommand(0, 0, "ui-stop", 0.1))
@@ -191,6 +203,17 @@ class JetBotRuntime(object):
         if action in mapping:
             return self.tools.dispatch(mapping[action], extra)
         return {"ok": False, "error": "unknown action %s" % action}
+
+    def set_allow_motion(self, allowed, source="ui"):
+        allowed = bool(allowed)
+        self.cfg.setdefault("robot", {})["allow_motion"] = allowed
+        if not allowed:
+            try:
+                self.planner.halt()
+            except Exception:
+                pass
+        self.safety.set_allow_motion(allowed, source=source)
+        return {"ok": True, "allow_motion": allowed, "action": "unlock" if allowed else "lock"}
 
 
 def create_runtime(config_path=None):

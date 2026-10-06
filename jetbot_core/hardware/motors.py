@@ -1,4 +1,10 @@
-"""Motor abstraction. Agent never talks to PWM."""
+"""Motor abstraction. Agent/tools never talk to PWM.
+
+Preferred backend is NVIDIA's stock `jetbot.Robot` (`set_motors` /
+`left` / `right` / `forward` / `stop`). Tools stay semantic and only
+reach this layer after Safety. If the kit lib or MotorHAT is missing,
+we simulate so the rest of the stack still runs.
+"""
 
 from __future__ import print_function
 
@@ -60,6 +66,62 @@ class SimulatedMotors(MotorController):
                 "ok": True,
                 "last_command": self.last_command,
             }
+
+
+class JetbotLibController(MotorController):
+    """Wrap NVIDIA jetbot.Robot. Same PWM path as the kit notebooks."""
+
+    def __init__(self, robot, left_alpha=1.0, right_alpha=1.0):
+        self.robot = robot
+        self.left_alpha = float(left_alpha)
+        self.right_alpha = float(right_alpha)
+        self._lock = threading.Lock()
+        self.left = 0.0
+        self.right = 0.0
+        self.last_command = 0.0
+        self.stop()
+
+    def set_speeds(self, left, right):
+        left = _clamp(float(left) * self.left_alpha, -1.0, 1.0)
+        right = _clamp(float(right) * self.right_alpha, -1.0, 1.0)
+        with self._lock:
+            if hasattr(self.robot, "set_motors"):
+                self.robot.set_motors(left, right)
+            else:
+                if left == right == 0.0 and hasattr(self.robot, "stop"):
+                    self.robot.stop()
+                elif abs(left + right) < 1e-6 and right > 0 and hasattr(self.robot, "left"):
+                    self.robot.left(abs(right))
+                elif abs(left + right) < 1e-6 and left > 0 and hasattr(self.robot, "right"):
+                    self.robot.right(abs(left))
+                elif left > 0 and right > 0 and hasattr(self.robot, "forward"):
+                    self.robot.forward(min(left, right))
+                elif left < 0 and right < 0 and hasattr(self.robot, "backward"):
+                    self.robot.backward(min(abs(left), abs(right)))
+                else:
+                    self.robot.set_motors(left, right)
+            self.left = left
+            self.right = right
+            self.last_command = time.time()
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "backend": "jetbot",
+                "left": self.left,
+                "right": self.right,
+                "ok": True,
+                "last_command": self.last_command,
+            }
+
+    def close(self):
+        try:
+            if hasattr(self.robot, "stop"):
+                self.robot.stop()
+            else:
+                self.stop()
+        except Exception:
+            pass
 
 
 class AdafruitMotorHATController(MotorController):
@@ -161,26 +223,63 @@ def _i2c_present(bus, address):
         return False
 
 
+def _try_import_jetbot_robot():
+    """Load NVIDIA jetbot.Robot without requiring a site-packages install."""
+    import os
+    import sys
+    candidates = [
+        "/home/jetbot/jetbot",
+        os.path.expanduser("~/jetbot"),
+        "/opt/jetbot",
+    ]
+    for root in candidates:
+        if os.path.isdir(os.path.join(root, "jetbot")) and root not in sys.path:
+            sys.path.insert(0, root)
+    try:
+        from jetbot import Robot
+        return Robot
+    except Exception as exc:
+        log.info("jetbot.Robot unavailable: %s", exc)
+        return None
+
+
 def try_create_motors(cfg):
     motors_cfg = cfg.get("motors", {})
     simulate = cfg.get("robot", {}).get("simulate_if_missing", True)
     bus = int(motors_cfg.get("i2c_bus", 1))
     address = int(motors_cfg.get("address", 0x60))
+    left_alpha = float(motors_cfg.get("left_alpha", 1.0))
+    right_alpha = float(motors_cfg.get("right_alpha", 1.0))
+    present = _i2c_present(bus, address)
+
+    Robot = _try_import_jetbot_robot()
+    if Robot is not None and (present or not simulate):
+        try:
+            kwargs = {}
+            if hasattr(Robot, "i2c_bus"):
+                kwargs["i2c_bus"] = bus
+            robot = Robot(**kwargs) if kwargs else Robot()
+            log.info("Using jetbot.Robot (stock kit) on i2c-%s", bus)
+            return JetbotLibController(robot, left_alpha, right_alpha), "jetbot"
+        except Exception as exc:
+            log.warning("jetbot.Robot init failed: %s", exc)
+            if not simulate:
+                raise
+
     try:
         from Adafruit_MotorHAT import Adafruit_MotorHAT  # noqa: F401
         hat_ok = True
     except Exception as exc:
         log.warning("Adafruit_MotorHAT unavailable: %s", exc)
         hat_ok = False
-    present = _i2c_present(bus, address)
     if hat_ok and (present or not simulate):
         try:
             ctrl = AdafruitMotorHATController(
                 i2c_bus=bus,
                 left_channel=int(motors_cfg.get("left_channel", 1)),
                 right_channel=int(motors_cfg.get("right_channel", 2)),
-                left_alpha=float(motors_cfg.get("left_alpha", 1.0)),
-                right_alpha=float(motors_cfg.get("right_alpha", 1.0)),
+                left_alpha=left_alpha,
+                right_alpha=right_alpha,
                 address=address,
             )
             log.info("Using Adafruit MotorHAT on i2c-%s addr 0x%x", bus, address)
@@ -189,5 +288,6 @@ def try_create_motors(cfg):
             log.warning("MotorHAT init failed: %s", exc)
             if not simulate:
                 raise
-    log.info("Using simulated motors (hat_ok=%s i2c_present=%s)", hat_ok, present)
+    log.info("Using simulated motors (jetbot_lib=%s hat_ok=%s i2c_present=%s)",
+             Robot is not None, hat_ok, present)
     return SimulatedMotors(), "simulated"

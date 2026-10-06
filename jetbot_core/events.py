@@ -32,6 +32,7 @@ class EventType(object):
     TASK_CANCELLED = "TaskCancelled"
     NAVIGATION_BLOCKED = "NavigationBlocked"
     NAVIGATION_RECOVERED = "NavigationRecovered"
+    NAVIGATION_RECOVERY_FAILED = "NavigationRecoveryFailed"
     EMERGENCY_STOP = "EmergencyStop"
     COMMAND_REJECTED = "CommandRejected"
     PERCEPTION_STALE = "PerceptionStale"

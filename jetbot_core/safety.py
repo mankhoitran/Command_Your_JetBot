@@ -41,14 +41,16 @@ class SafetyController(object):
     def __init__(self, cfg, motors, world, bus):
         safety = cfg.get("safety", {})
         motors_cfg = cfg.get("motors", {})
-        self.min_obstacle_m = float(safety.get("min_obstacle_m", 0.38))
-        self.slow_obstacle_m = float(safety.get("slow_obstacle_m", 0.70))
+        self.min_obstacle_m = float(safety.get("min_obstacle_m", 0.18))
+        self.slow_obstacle_m = float(safety.get("slow_obstacle_m", 0.36))
+        self.turn_obstacle_m = float(safety.get("turn_obstacle_m", 0.06))
         self.max_speed = float(safety.get("max_speed", motors_cfg.get("max_speed", 0.25)))
         self.max_turn = float(safety.get("max_turn", 0.35))
         self.stale_s = float(safety.get("stale_perception_s", 0.90))
         self.command_timeout_s = float(safety.get("command_timeout_s", 1.20))
         self.require_fresh = bool(safety.get("require_fresh_perception_to_move", True))
         self.min_command = float(motors_cfg.get("min_command", 0.05))
+        self._allow_motion = bool(cfg.get("robot", {}).get("allow_motion", False))
         self.motors = motors
         self.world = world
         self.bus = bus
@@ -65,6 +67,16 @@ class SafetyController(object):
     def estop(self):
         with self._lock:
             return self._estop
+
+    @property
+    def allow_motion(self):
+        with self._lock:
+            return self._allow_motion
+
+    @allow_motion.setter
+    def allow_motion(self, value):
+        with self._lock:
+            self._allow_motion = bool(value)
 
     def emergency_stop(self, source="user"):
         with self._lock:
@@ -89,6 +101,22 @@ class SafetyController(object):
             pass
         log.info("E-STOP cleared by %s", source)
 
+    def set_allow_motion(self, allowed, source="user"):
+        allowed = bool(allowed)
+        with self._lock:
+            self._allow_motion = allowed
+            if not allowed:
+                self._command = MotionCommand(0, 0, "motion-lock", 0)
+        if not allowed:
+            try:
+                self.motors.stop()
+            except Exception:
+                pass
+            self.world.update_robot(left_speed=0.0, right_speed=0.0,
+                                    velocity={"linear": 0.0, "angular": 0.0})
+        log.info("allow_motion=%s from %s", allowed, source)
+        return allowed
+
     def request(self, command):
         """Validate and latch a motion command. Returns (ok, reason)."""
         if not isinstance(command, MotionCommand):
@@ -96,10 +124,29 @@ class SafetyController(object):
         with self._lock:
             if self._estop:
                 self._last_reject = "estop"
-                self.bus.emit(EventType.COMMAND_REJECTED, "safety", {
-                    "reason": "estop", "source": command.source,
-                })
-                return False, "estop"
+                locked = False
+                estopped = True
+            else:
+                estopped = False
+                locked = not self._allow_motion
+        if estopped:
+            self.bus.emit(EventType.COMMAND_REJECTED, "safety", {
+                "reason": "estop", "source": command.source,
+            })
+            return False, "estop"
+        if locked and (abs(command.left) > 1e-6 or abs(command.right) > 1e-6):
+            held = MotionCommand(0.0, 0.0, command.source, command.duration_s)
+            held.ts = command.ts
+            with self._lock:
+                self._command = held
+                self._last_reject = "motion_locked"
+            self.bus.emit(EventType.COMMAND_REJECTED, "safety", {
+                "reason": "motion_locked",
+                "source": command.source,
+                "requested": {"left": command.left, "right": command.right},
+            })
+            log.info("motion locked (charging); accepted %s without spinning", command.source)
+            return False, "motion_locked"
         ok, reason, safe = self.validate(command)
         if not ok:
             with self._lock:
@@ -125,15 +172,21 @@ class SafetyController(object):
             diff = (left - right) * 0.5 * scale
             left = mean + diff
             right = mean - diff
-        moving_fwd = (left + right) > 0.04
-        snap = self.world.snapshot()
-        obs = snap["obstacles"]
-        fresh = snap["freshness"]
+        net = left + right
+        moving_fwd = net > 0.04
+        turning = abs(left - right) > 0.08 and abs(net) <= 0.08
+        view = self.world.obstacles_view()
+        obs = view["obstacles"]
+        fresh = view["freshness"]
         if self.require_fresh and moving_fwd and fresh["obstacles"] == "STALE":
             self.bus.emit(EventType.PERCEPTION_STALE, "safety", {"while": "forward"})
             return False, "stale_perception", MotionCommand(0, 0, command.source, 0)
         front = obs.get("front_m")
-        if moving_fwd and front is not None and front <= self.min_obstacle_m:
+        blocked = bool(obs.get("blocked"))
+        if moving_fwd and (blocked or (front is not None and front <= self.min_obstacle_m)):
+            return False, "obstacle", MotionCommand(0, 0, command.source, 0)
+        # In-place left/right are low-risk; only stop a spin if nearly touching.
+        if turning and front is not None and front <= self.turn_obstacle_m:
             return False, "obstacle", MotionCommand(0, 0, command.source, 0)
         if moving_fwd and front is not None and front <= self.slow_obstacle_m:
             scale = max(0.15, (front - self.min_obstacle_m) / max(1e-3, self.slow_obstacle_m - self.min_obstacle_m))
@@ -172,8 +225,9 @@ class SafetyController(object):
             t0 = time.time()
             with self._lock:
                 estop = self._estop
+                allow = self._allow_motion
                 cmd = self._command
-            if estop:
+            if estop or not allow:
                 try:
                     self.motors.stop()
                 except Exception:
@@ -181,7 +235,12 @@ class SafetyController(object):
                 self.world.update_robot(left_speed=0.0, right_speed=0.0,
                                         velocity={"linear": 0.0, "angular": 0.0})
             else:
-                expired = (time.time() - cmd.ts) > max(cmd.duration_s, self.command_timeout_s)
+                moving = abs(cmd.left) > 1e-6 or abs(cmd.right) > 1e-6
+                if moving:
+                    hold = min(max(cmd.duration_s, 0.05), self.command_timeout_s)
+                else:
+                    hold = max(cmd.duration_s, 0.05)
+                expired = (time.time() - cmd.ts) > hold
                 if expired:
                     left = right = 0.0
                     source = "watchdog"
@@ -193,6 +252,10 @@ class SafetyController(object):
                     else:
                         left = right = 0.0
                         source = "safety:" + reason
+                with self._lock:
+                    if self._estop or not self._allow_motion:
+                        left = right = 0.0
+                        source = "estop" if self._estop else "motion-lock"
                 try:
                     self.motors.set_speeds(left, right)
                 except Exception as exc:

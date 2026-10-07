@@ -87,8 +87,12 @@ Uncertainty: `EXECUTING → ACTIVE_PERCEPTION → PLANNING`
 The local llama.cpp server advertises **n_ctx = 2048**. Prompts are a world
 summary + a few memory lines + the user instruction. The model must return a
 JSON tool plan. **Keywords first**, then TypeSafe if unknown, then LLM.
-Pad/manual motion does not start a cognitive task. `NAVIGATION_BLOCKED`
-runs local recovery; the Agent replans only on `NAVIGATION_RECOVERY_FAILED`.
+The world summary includes `wheels: LOCKED|FREE`, `recovery_active`, occupancy
+bins, and object `id(class)` so the Agent can plan without inventing latch or
+target ids. Tool `ok:false` is spoken honestly; the Agent does not claim OK
+after a Safety veto. Pad/manual motion does not start a cognitive task.
+`NAVIGATION_BLOCKED` runs local recovery; the Agent replans only on
+`NAVIGATION_RECOVERY_FAILED`.
 
 ## Hardware backends
 

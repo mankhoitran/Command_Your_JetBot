@@ -43,8 +43,32 @@ class ToolRouter(object):
         name = str(name).strip()
         if self.world.obstacles_view()["robot"]["estop"] and name not in ("motion.stop", "task.fail", "task.complete"):
             return {"ok": False, "tool": name, "error": "estop"}
-        if name.startswith("motion.") and name != "motion.stop" and self.planner.in_recovery():
+        motion_like = (
+            name.startswith("motion.")
+            or name in ("nav.go_to", "nav.follow", "camera.look_left", "camera.look_right")
+        )
+        if motion_like and name != "motion.stop" and self.planner.in_recovery():
+            try:
+                self.bus.emit(EventType.COMMAND_REJECTED, "tools", {
+                    "reason": "recovery_active", "tool": name,
+                })
+            except Exception:
+                pass
             return {"ok": False, "tool": name, "error": "recovery_active"}
+        if motion_like and name != "motion.stop":
+            allow = True
+            try:
+                allow = bool(self.safety.allow_motion)
+            except Exception:
+                allow = True
+            if not allow:
+                try:
+                    self.bus.emit(EventType.COMMAND_REJECTED, "tools", {
+                        "reason": "motion_locked", "tool": name,
+                    })
+                except Exception:
+                    pass
+                return {"ok": False, "tool": name, "error": "motion_locked"}
         handler = {
             "motion.forward": self._forward,
             "motion.backward": self._backward,
@@ -255,24 +279,58 @@ class ToolRouter(object):
             return {"ok": True, "target": target, "camera": "fixed", "body_yaw": True}
         return {"ok": True, "target": target, "camera": "fixed", "note": "no gimbal"}
 
+    def _resolve_object(self, ref):
+        """Map a user class/name or object id onto the best visible object id."""
+        objs = self.world.objects_view()
+        if not objs:
+            return None
+        raw = (ref or "").strip()
+        if not raw:
+            return None
+        if raw in objs:
+            return raw
+        key = raw.lower()
+        for prefix in ("the ", "a ", "an "):
+            if key.startswith(prefix):
+                key = key[len(prefix):]
+                break
+        matches = []
+        for oid, obj in objs.items():
+            cls = str(obj.get("class") or "").lower()
+            if key == cls or key in cls or cls in key or key == str(oid).lower():
+                matches.append(obj)
+        if not matches:
+            return None
+        matches.sort(key=lambda o: -float(o.get("confidence") or 0.0))
+        return matches[0].get("id")
+
     def _go_to(self, args):
         target = args.get("target") or args.get("name")
-        objs = self.world.objects_view()
-        if target and target in objs:
-            self.planner.set_mode("follow", duration_s=4.0, target=target)
-            self.world.set_navigation(current_target=target, mode="follow")
+        resolved = self._resolve_object(target)
+        if resolved:
+            self.planner.set_mode("follow", duration_s=4.0, target=resolved)
+            self.world.set_navigation(current_target=resolved, mode="follow")
             self._note("follow")
-            return {"ok": True, "target": target, "mode": "follow"}
+            return {"ok": True, "target": resolved, "requested": target, "mode": "follow"}
         self.planner.halt()
         self._scan({})
         return {"ok": False, "target": target, "error": "unknown_target"}
 
     def _follow(self, args):
         target = args.get("target")
-        self.planner.set_mode("follow", duration_s=4.0, target=target)
-        self.world.set_navigation(current_target=target, mode="follow")
+        resolved = self._resolve_object(target) if target else None
+        if resolved is None:
+            objs = self.world.objects_view()
+            people = [o for o in objs.values() if o.get("class") == "person"]
+            if people:
+                people.sort(key=lambda o: -float(o.get("confidence") or 0.0))
+                resolved = people[0].get("id")
+        if resolved is None:
+            return {"ok": False, "target": target, "error": "unknown_target"}
+        self.planner.set_mode("follow", duration_s=4.0, target=resolved)
+        self.world.set_navigation(current_target=resolved, mode="follow")
         self._note("follow")
-        return {"ok": True, "target": target}
+        return {"ok": True, "target": resolved}
 
     def _remember(self, args):
         content = args.get("content") or args.get("text") or ""

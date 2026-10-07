@@ -95,14 +95,14 @@
         <p class="say" id="agent-say">idle</p>
         <form id="cmd-form">
           <input id="cmd-text" autocomplete="off" placeholder="Tell the robot what to do…"/>
-          <button id="btn-mic" type="button" title="Hold to talk">MIC</button>
+          <button id="btn-mic" type="button" title="Allow microphone, then hold to talk">ALLOW MIC</button>
           <button type="submit">SEND</button>
         </form>
         <div class="voice">
           <label>Whisper audio
             <input id="audio-file" type="file" accept="audio/*,.wav,.mp3,.ogg"/>
           </label>
-          <span id="voice-status">hold MIC to talk</span>
+          <span id="voice-status">click ALLOW MIC first, then hold to talk</span>
         </div>
         <ul class="decisions" id="decisions"></ul>
       </section>

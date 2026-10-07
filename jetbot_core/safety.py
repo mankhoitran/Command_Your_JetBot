@@ -54,6 +54,10 @@ class SafetyController(object):
         self.motors = motors
         self.world = world
         self.bus = bus
+        try:
+            self.world.update_robot(allow_motion=self._allow_motion)
+        except Exception:
+            pass
         self._lock = threading.Lock()
         self._estop = False
         self._command = MotionCommand(0, 0, "init", 0)
@@ -77,6 +81,10 @@ class SafetyController(object):
     def allow_motion(self, value):
         with self._lock:
             self._allow_motion = bool(value)
+        try:
+            self.world.update_robot(allow_motion=bool(value))
+        except Exception:
+            pass
 
     def emergency_stop(self, source="user"):
         with self._lock:
@@ -114,6 +122,10 @@ class SafetyController(object):
                 pass
             self.world.update_robot(left_speed=0.0, right_speed=0.0,
                                     velocity={"linear": 0.0, "angular": 0.0})
+        try:
+            self.world.update_robot(allow_motion=allowed)
+        except Exception:
+            pass
         log.info("allow_motion=%s from %s", allowed, source)
         return allowed
 

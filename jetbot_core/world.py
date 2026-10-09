@@ -60,6 +60,7 @@ class WorldState(object):
             "camera_pan": 0.0,
             "camera_tilt": 0.0,
             "estop": False,
+            "allow_motion": False,
             "hardware": {
                 "motors": "unknown",
                 "servo": "unknown",
@@ -132,29 +133,38 @@ class WorldState(object):
         task = snap["task"]
         perc = snap["perception"]
         fresh = snap["freshness"]
+        wheels = "FREE" if robot.get("allow_motion") else "LOCKED"
+        recovery = bool(nav.get("mode") == "recovery")
+        bins = obs.get("bins") or []
+        if bins:
+            bin_s = " ".join("%.2f" % float(b) for b in bins)
+        else:
+            bin_s = "none"
         lines = [
             "task: %s state=%s action=%s" % (task.get("name") or "none", task.get("state"), task.get("action")),
-            "robot: pose=(%.2f,%.2f,yaw=%.2f) v=%.2f estop=%s motors=%s camera=%s pan=%.0f tilt=%.0f"
+            "wheels: %s  estop=%s  recovery_active=%s" % (wheels, robot.get("estop"), recovery),
+            "robot: pose=(%.2f,%.2f,yaw=%.2f) v=%.2f motors=%s camera=%s pan=%.0f tilt=%.0f"
             % (
                 robot["pose"]["x"],
                 robot["pose"]["y"],
                 robot["pose"]["yaw"],
                 robot["velocity"]["linear"],
-                robot["estop"],
                 robot["hardware"]["motors"],
                 robot["hardware"]["camera"],
                 robot["camera_pan"],
                 robot["camera_tilt"],
             ),
-            "obstacle: front=%s blocked=%s dir=%s conf=%.2f certainty=%s"
+            "obstacle: front=%s blocked=%s dir=%s conf=%.2f certainty=%s bins(L->R)=%s"
             % (
                 "%.2fm" % obs["front_m"] if obs["front_m"] is not None else "unknown",
                 obs["blocked"],
                 obs["direction"],
                 obs["confidence"],
                 fresh["obstacles"],
+                bin_s,
             ),
-            "nav: mode=%s target=%s blocked=%s" % (nav["mode"], nav["current_target"], nav["blocked"]),
+            "nav: mode=%s target=%s blocked=%s recovery_active=%s"
+            % (nav["mode"], nav["current_target"], nav["blocked"], recovery),
             "perception: fps=%.1f depth_fps=%.1f detect_fps=%.1f stale=%s"
             % (perc["fps"], perc["depth_fps"], perc["detect_fps"], fresh["perception"] == STALE),
         ]

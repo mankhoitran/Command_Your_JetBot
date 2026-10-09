@@ -239,8 +239,29 @@ def _try_import_jetbot_robot():
         from jetbot import Robot
         return Robot
     except Exception as exc:
-        log.info("jetbot.Robot unavailable: %s", exc)
-        return None
+        log.info("jetbot top-level import failed (%s); trying robot submodule", exc)
+    # The stock jetbot/__init__.py pulls notebook-only deps (ipywidgets,
+    # camera, tensorrt detector). The motor driver only needs jetbot.robot
+    # + jetbot.motor, so load the submodule with a stub parent package.
+    import sys as _sys
+    import types as _types
+    for _mod in ("jetbot", "jetbot.robot", "jetbot.motor"):
+        _sys.modules.pop(_mod, None)
+    for root in candidates:
+        pkgdir = os.path.join(root, "jetbot")
+        if os.path.isfile(os.path.join(pkgdir, "robot.py")):
+            try:
+                stub = _types.ModuleType("jetbot")
+                stub.__path__ = [pkgdir]
+                _sys.modules["jetbot"] = stub
+                from jetbot.robot import Robot
+                return Robot
+            except Exception as exc2:
+                log.info("jetbot.robot submodule unavailable: %s", exc2)
+                _sys.modules.pop("jetbot", None)
+                _sys.modules.pop("jetbot.robot", None)
+                _sys.modules.pop("jetbot.motor", None)
+    return None
 
 
 def try_create_motors(cfg):

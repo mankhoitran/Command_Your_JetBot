@@ -3,6 +3,8 @@
   var connected = false;
   var allowMotion = false;
   var micRec = null;
+  var micReady = false;
+  var micAsking = false;
 
   function $(id) { return document.getElementById(id); }
   function fmt(n, d) {
@@ -193,9 +195,18 @@
       .catch(function () {});
   }
 
+  function flashSay(msg) {
+    var el = $("agent-say");
+    if (el) el.textContent = msg;
+  }
+
   document.querySelectorAll("[data-act]").forEach(function (btn) {
     btn.addEventListener("click", function () {
-      post("/api/manual", { action: btn.getAttribute("data-act"), duration: 0.8 });
+      post("/api/manual", { action: btn.getAttribute("data-act"), duration: 0.8 }).then(function (d) {
+        if (d && d.ok === false) flashSay(d.error || "command not accepted");
+      }).catch(function (e) {
+        flashSay("request failed: " + e);
+      });
     });
   });
   function toggleMotion() {
@@ -224,11 +235,50 @@
     var st = $("voice-status");
     var btn = $("btn-mic");
     if (st) st.textContent = msg || "";
-    if (btn) {
-      if (rec) btn.classList.add("rec");
-      else btn.classList.remove("rec");
-      btn.textContent = rec ? "REC" : "MIC";
+    if (!btn) return;
+    btn.classList.toggle("rec", !!rec);
+    btn.classList.toggle("ready", !!micReady && !rec);
+    if (rec) {
+      btn.textContent = "REC";
+      btn.title = "Release to send";
+    } else if (micReady) {
+      btn.textContent = "HOLD TALK";
+      btn.title = "Hold to talk";
+    } else {
+      btn.textContent = "ALLOW MIC";
+      btn.title = "Allow microphone, then hold to talk";
     }
+  }
+
+  function requestMicPermission() {
+    if (micReady || micAsking) return Promise.resolve(micReady);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setVoice("mic not available in this browser", false);
+      return Promise.resolve(false);
+    }
+    micAsking = true;
+    setVoice("waiting for browser permission…", false);
+    return navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      try {
+        stream.getTracks().forEach(function (t) { t.stop(); });
+      } catch (e) {}
+      micReady = true;
+      micAsking = false;
+      setVoice("mic allowed — hold HOLD TALK to speak", false);
+      return true;
+    }).catch(function (e) {
+      micReady = false;
+      micAsking = false;
+      var name = (e && e.name) || "";
+      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+        setVoice("mic blocked — allow microphone for this site, then click ALLOW MIC", false);
+      } else if (name === "NotFoundError") {
+        setVoice("no microphone found", false);
+      } else {
+        setVoice("mic denied: " + e, false);
+      }
+      return false;
+    });
   }
 
   function encodeWav(samples, sampleRate) {
@@ -289,14 +339,15 @@
   }
 
   function startMic() {
-    if (micRec) return;
+    if (micRec || !micReady) return;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setVoice("mic not available", false);
+      setVoice("mic not available in this browser", false);
       return;
     }
     navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
       var Ctx = window.AudioContext || window.webkitAudioContext;
       var ctx = new Ctx();
+      if (ctx.state === "suspended" && ctx.resume) ctx.resume();
       var src = ctx.createMediaStreamSource(stream);
       var node = ctx.createScriptProcessor(4096, 1, 1);
       var mute = ctx.createGain();
@@ -309,8 +360,9 @@
       node.connect(mute);
       mute.connect(ctx.destination);
       micRec = { stream: stream, ctx: ctx, node: node, src: src, mute: mute, chunks: chunks };
-      setVoice("listening… hold MIC", true);
+      setVoice("listening… release to send", true);
     }).catch(function (e) {
+      micReady = false;
       setVoice("mic denied: " + e, false);
     });
   }
@@ -341,13 +393,30 @@
   (function bindMic() {
     var btn = $("btn-mic");
     if (!btn) return;
-    btn.addEventListener("mousedown", function (ev) { ev.preventDefault(); startMic(); });
+    btn.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      if (!micReady) requestMicPermission();
+    });
+    btn.addEventListener("mousedown", function (ev) {
+      ev.preventDefault();
+      if (!micReady) {
+        requestMicPermission();
+        return;
+      }
+      startMic();
+    });
     btn.addEventListener("mouseup", function (ev) { ev.preventDefault(); stopMic(); });
     btn.addEventListener("mouseleave", function () { if (micRec) stopMic(); });
-    btn.addEventListener("touchstart", function (ev) { ev.preventDefault(); startMic(); }, { passive: false });
+    btn.addEventListener("touchstart", function (ev) {
+      ev.preventDefault();
+      if (!micReady) {
+        requestMicPermission();
+        return;
+      }
+      startMic();
+    }, { passive: false });
     btn.addEventListener("touchend", function (ev) { ev.preventDefault(); stopMic(); });
     btn.addEventListener("touchcancel", function () { if (micRec) stopMic(); });
-    btn.addEventListener("click", function (ev) { ev.preventDefault(); });
   })();
 
   setInterval(tick, 1000);

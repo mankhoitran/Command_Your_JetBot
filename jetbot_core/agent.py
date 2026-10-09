@@ -30,7 +30,19 @@ _LLM_NEEDLES = (
     "replan", "path blocked", "do not ram",
     "tell me", "do you see", "what do you see",
     "look for", "find a", "find the",
+    "toward", "towards", "go through",
+    "closer to", "move closer",
 )
+
+TOOL_FAIL_SAY = {
+    "estop": "Emergency stop is active.",
+    "motion_locked": "Motion is currently locked.",
+    "stale_perception": "Motion is paused because the camera state is stale.",
+    "obstacle": "Path is blocked; holding.",
+    "recovery_active": "Recovery is in progress; waiting.",
+    "unknown_target": "I can't currently identify the requested target.",
+    "scan already running": "A scan is already running.",
+}
 
 
 def _needs_llm(text):
@@ -38,6 +50,47 @@ def _needs_llm(text):
     if not text:
         return False
     return any(needle in text for needle in _LLM_NEEDLES)
+
+
+def _normalize_command(text):
+    t = (text or "").strip().lower()
+    t = t.replace("'", "").replace("\u2019", "")
+    return t
+
+
+def _phrase_match(text, key):
+    """Match a keyword as a command, not as an incidental word in a longer request."""
+    t = _normalize_command(text)
+    k = _normalize_command(key)
+    if not t or not k:
+        return False
+    if t == k:
+        return True
+    if t.startswith(k + " "):
+        return True
+    # Multi-word keys ("go forward", "turn left") may appear at the end or inside.
+    if " " in k:
+        if t.endswith(" " + k):
+            return True
+        if (" " + k + " ") in (" " + t + " "):
+            return True
+        return False
+    # Single-token left/right are too common as adjectives ("on the left").
+    if k in ("left", "right"):
+        return False
+    return t.endswith(" " + k)
+
+
+def say_for_tool_results(results, default_say):
+    """Honest status: never claim OK when a tool returned ok:false."""
+    for result in results or []:
+        if not isinstance(result, dict):
+            continue
+        if result.get("ok"):
+            continue
+        err = str(result.get("error") or "failed")
+        return (TOOL_FAIL_SAY.get(err) or err)[:240]
+    return default_say
 
 
 class Agent(object):
@@ -238,8 +291,12 @@ class Agent(object):
                     if self._aborted():
                         break
                     results.append(self.tools.dispatch(n, a))
-                self.last_say = "OK: %s" % intent
+                self.last_say = say_for_tool_results(results, "OK: %s" % intent)
                 self._record("local", intent, self.last_say, [{"name": n, "args": a} for n, a in tools], results)
+                try:
+                    self.tasks.transition(EXECUTING, action="tools", progress=0.5)
+                except ValueError:
+                    pass
                 return
 
             now = time.time()
@@ -280,6 +337,7 @@ class Agent(object):
             if self._aborted():
                 self.last_say = "emergency stop"
                 return
+            self.last_say = say_for_tool_results(results, plan.get("say") or "")
             if plan.get("failed"):
                 try:
                     self.tasks.transition(FAILED, action="plan", failure=plan.get("reason"))
@@ -311,21 +369,20 @@ class Agent(object):
             self._busy = False
 
     def _keyword_intent(self, text):
-        t = (text or "").strip().lower()
         mapping = [
-            (("stop", "halt", "freeze", "estop", "e-stop"), "stop"),
-            (("look around", "scan", "survey", "inspect room"), "scan"),
+            (("stop", "halt", "freeze", "estop", "e-stop", "dont move", "do not move"), "stop"),
+            (("look around", "scan the room", "check whats around", "inspect room", "survey", "scan"), "scan"),
             (("explore", "wander", "look around the room"), "explore"),
-            (("follow me", "follow", "come here"), "follow"),
-            (("status", "where are you", "what's going on", "report"), "status"),
-            (("go forward", "move forward", "drive forward", "forward", "ahead"), "forward"),
-            (("back", "backward", "reverse"), "backward"),
-            (("left", "turn left"), "left"),
-            (("right", "turn right"), "right"),
+            (("follow me", "come here", "follow"), "follow"),
+            (("status", "where are you", "whats going on", "report"), "status"),
+            (("go forward", "move forward", "drive forward", "come forward", "move ahead", "go ahead", "forward", "ahead"), "forward"),
+            (("go backward", "move backward", "drive backward", "go back", "move back", "back up", "backup", "backward", "reverse"), "backward"),
+            (("turn left", "go left", "rotate left", "to the left", "left"), "left"),
+            (("turn right", "go right", "rotate right", "to the right", "right"), "right"),
         ]
         for keys, intent in mapping:
             for key in keys:
-                if t == key or t.startswith(key + " ") or t.endswith(" " + key):
+                if _phrase_match(text, key):
                     return intent, 0.9
         return None
 

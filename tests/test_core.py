@@ -16,7 +16,7 @@ if ROOT not in sys.path:
 from jetbot_core.config import load_config
 from jetbot_core.events import Event, EventBus, EventType
 from jetbot_core.llm import parse_plan
-from jetbot_core.agent import Agent, _needs_llm
+from jetbot_core.agent import Agent, _needs_llm, say_for_tool_results
 from jetbot_core.memory import SemanticMemory
 from jetbot_core.navigation import LocalPlanner
 from jetbot_core.safety import MotionCommand, SafetyController
@@ -53,6 +53,18 @@ class WorldTests(unittest.TestCase):
         text = w.summary_for_llm()
         self.assertIn("task:", text)
         self.assertNotIn("ndarray", text)
+        self.assertIn("wheels: LOCKED", text)
+        self.assertIn("recovery_active=False", text)
+
+    def test_llm_summary_exposes_lock_recovery_and_bins(self):
+        w = WorldState()
+        w.update_robot(allow_motion=True)
+        w.update_obstacles(1.4, [0.1, 0.2, 0.3, 0.2, 0.1], False, "none", 0.6, "test")
+        w.set_navigation(mode="recovery", current_target=None, blocked=True)
+        text = w.summary_for_llm()
+        self.assertIn("wheels: FREE", text)
+        self.assertIn("recovery_active=True", text)
+        self.assertIn("bins(L->R)=0.10 0.20 0.30 0.20 0.10", text)
 
 
 class EventTests(unittest.TestCase):
@@ -399,6 +411,7 @@ class PipelineFixTests(unittest.TestCase):
         bus = EventBus()
         planner = LocalPlanner(cfg, w, SafetyController(cfg, SimulatedMotors(), w, bus), bus)
         tasks = TaskManager(w, bus)
+        planner.safety.allow_motion = True
         tools = ToolRouter(w, planner.safety, planner, FixedServo(), SemanticMemory(tempfile.mkstemp(suffix=".json")[1]), tasks, bus)
         out = tools.dispatch("camera.look_left", {})
         self.assertTrue(out.get("ok"))
@@ -493,6 +506,89 @@ class PipelineFixTests(unittest.TestCase):
             motors.set_speeds(0.0, 0.0)
         self.assertEqual(motors.snapshot()["left"], 0.0)
         self.assertEqual(motors.snapshot()["right"], 0.0)
+
+    def test_paraphrases_resolve_locally(self):
+        agent = Agent.__new__(Agent)
+        agent.typesafe = None
+        cases = [
+            ("come forward a little", "forward"),
+            ("move ahead", "forward"),
+            ("rotate right", "right"),
+            ("go left", "left"),
+            ("don't move", "stop"),
+            ("check what's around", "scan"),
+            ("scan the room", "scan"),
+        ]
+        for text, intent in cases:
+            hit = Agent._keyword_intent(agent, text)
+            self.assertIsNotNone(hit, text)
+            self.assertEqual(hit[0], intent, text)
+            out = Agent._local_intent(agent, text, source="web")
+            self.assertEqual(out[0], intent, text)
+        self.assertIsNone(Agent._keyword_intent(agent, "move toward the chair"))
+        self.assertIsNone(Agent._keyword_intent(agent, "on the left"))
+        self.assertIsNone(Agent._local_intent(agent, "move toward the chair", source="web"))
+
+    def test_say_for_tool_results_is_honest(self):
+        self.assertEqual(
+            say_for_tool_results([{"ok": False, "error": "motion_locked"}], "OK: forward"),
+            "Motion is currently locked.",
+        )
+        self.assertEqual(
+            say_for_tool_results([{"ok": True, "tool": "motion.forward"}], "OK: forward"),
+            "OK: forward",
+        )
+        self.assertEqual(
+            say_for_tool_results([{"ok": False, "error": "unknown_target"}], "OK: follow"),
+            "I can't currently identify the requested target.",
+        )
+
+    def test_locked_motion_is_not_ok(self):
+        cfg = load_config(os.path.join(ROOT, "config.yaml"))
+        w = WorldState()
+        bus = EventBus()
+        planner = LocalPlanner(cfg, w, SafetyController(cfg, SimulatedMotors(), w, bus), bus)
+        planner.safety.allow_motion = False
+        tasks = TaskManager(w, bus)
+        tools = ToolRouter(w, planner.safety, planner, FixedServo(), SemanticMemory(tempfile.mkstemp(suffix=".json")[1]), tasks, bus)
+        out = tools.dispatch("motion.forward", {"duration": 1.0})
+        self.assertFalse(out.get("ok"))
+        self.assertEqual(out.get("error"), "motion_locked")
+        self.assertNotEqual(planner.mode, "forward")
+        look = tools.dispatch("camera.look_left", {})
+        self.assertFalse(look.get("ok"))
+        self.assertEqual(look.get("error"), "motion_locked")
+        self.assertEqual(w.robot["camera_pan"], 0.0)
+
+    def test_go_to_resolves_class_name(self):
+        cfg = load_config(os.path.join(ROOT, "config.yaml"))
+        w = WorldState()
+        w.upsert_object(TrackedObject("obj_03", "chair", [0.2, 0.2, 0.5, 0.7], 0.9))
+        w.upsert_object(TrackedObject("obj_01", "object", [0.6, 0.3, 0.8, 0.6], 0.4))
+        bus = EventBus()
+        planner = LocalPlanner(cfg, w, SafetyController(cfg, SimulatedMotors(), w, bus), bus)
+        planner.safety.allow_motion = True
+        tasks = TaskManager(w, bus)
+        tools = ToolRouter(w, planner.safety, planner, FixedServo(), SemanticMemory(tempfile.mkstemp(suffix=".json")[1]), tasks, bus)
+        out = tools.dispatch("nav.go_to", {"target": "chair"})
+        self.assertTrue(out.get("ok"))
+        self.assertEqual(out.get("target"), "obj_03")
+        self.assertEqual(planner.mode, "follow")
+        miss = tools.dispatch("nav.go_to", {"target": "table"})
+        self.assertFalse(miss.get("ok"))
+        self.assertEqual(miss.get("error"), "unknown_target")
+
+    def test_follow_nobody_is_unknown_target(self):
+        cfg = load_config(os.path.join(ROOT, "config.yaml"))
+        w = WorldState()
+        bus = EventBus()
+        planner = LocalPlanner(cfg, w, SafetyController(cfg, SimulatedMotors(), w, bus), bus)
+        planner.safety.allow_motion = True
+        tasks = TaskManager(w, bus)
+        tools = ToolRouter(w, planner.safety, planner, FixedServo(), SemanticMemory(tempfile.mkstemp(suffix=".json")[1]), tasks, bus)
+        out = tools.dispatch("nav.follow", {})
+        self.assertFalse(out.get("ok"))
+        self.assertEqual(out.get("error"), "unknown_target")
 
 
 if __name__ == "__main__":

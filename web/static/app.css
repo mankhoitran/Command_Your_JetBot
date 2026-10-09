@@ -82,8 +82,10 @@ button, input { font: inherit; color: inherit; }
 .pad button.warn { border-color: #5a4a22; color: var(--warn); }
 #btn-motion { letter-spacing: 0.08em; }
 #btn-motion.on { border-color: #245c38; color: var(--ok); }
-#btn-mic { min-width: 64px; }
+#btn-mic { min-width: 92px; }
+#btn-mic.ready { border-color: var(--ok); color: var(--ok); }
 #btn-mic.rec { border-color: var(--estop); color: #fff; background: #5a1212; }
+#btn-mic:disabled { opacity: 0.55; cursor: not-allowed; }
 .kv { display: grid; grid-template-columns: 110px 1fr; gap: 2px 8px; font: 12px var(--mono); }
 .kv b { color: var(--muted); font-weight: 500; }
 .health { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }

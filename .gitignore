@@ -4,6 +4,8 @@ __pycache__/
 *$py.class
 *.so
 
+
+
 # Virtual environments
 venv/
 .venv/
@@ -51,7 +53,9 @@ checkpoints/
 secrets.yaml
 local.yaml
 
-# Runtime data (local state, not source)
+# Runtime data (local state, not source) / API_KEY, TOKEN
+data/github_key.txt
+data/ssl/
 data/*.json
 data/*.db
 data/*.sqlite*
@@ -69,3 +73,9 @@ Thumbs.db
 *.swp
 *.swo
 *~
+
+
+#Docs
+docs/
+
+

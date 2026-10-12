@@ -16,8 +16,9 @@ cd /home/jetbot/CYJ
 python3 run.py --config /home/jetbot/CYJ/config.yaml
 ```
 
-Console: `http://<nano-ip>:8080`  
-This device: `http://192.168.16.58:8080`
+Console: `https://<nano-ip>:8080` (SSL on; self-signed — accept the warning)  
+Monitor: `https://<nano-ip>:8090`  
+Find the IP with `hostname -I`. Do **not** use `http://` — the port is HTTPS-only and HTTP is reset. `0.0.0.0` in the log is the bind address, not a URL.
 
 E-STOP is the red button and `POST /api/estop`. It does not wait for the LLM.
 
@@ -60,6 +61,10 @@ stdlib `unittest`, hardware mocked. No physical motion.
 - `GET /api/events` — typed timeline
 - `GET /api/memory` — A-MEM-like notes
 - `GET /video` — MJPEG (overlay if perception has run)
+- Monitor `https://<nano-ip>:8090` — Dashboard / Pipeline / Agent Trace
+- `GET :8090/api/pipeline` — three-view JSON (loops, nodes, traces)
+- `GET :8090/api/stream` — SSE of the same payload
+- `GET :8090/api/motor` — requested / accepted / applied / rejected
 - Logs: stderr from `run.py` (`--log-level DEBUG`)
 
 If the camera is synthetic, CSI failed to open (often because another process

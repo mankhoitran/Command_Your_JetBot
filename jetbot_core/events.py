@@ -45,15 +45,24 @@ class EventType(object):
 
 
 class Event(object):
-    __slots__ = ("id", "type", "timestamp", "source", "payload", "confidence")
+    __slots__ = ("id", "type", "timestamp", "source", "payload", "confidence", "corr_id", "seq")
 
-    def __init__(self, event_type, source, payload=None, confidence=1.0, timestamp=None):
+    def __init__(self, event_type, source, payload=None, confidence=1.0,
+                 timestamp=None, corr_id=None):
         self.id = uuid.uuid4().hex[:12]
         self.type = event_type
         self.timestamp = time.time() if timestamp is None else timestamp
         self.source = source
         self.payload = payload if payload is not None else {}
         self.confidence = float(confidence)
+        if corr_id is None:
+            try:
+                from .telemetry import get_corr_id
+                corr_id = get_corr_id()
+            except Exception:
+                corr_id = None
+        self.corr_id = corr_id
+        self.seq = 0
 
     def to_dict(self):
         return {
@@ -63,6 +72,8 @@ class Event(object):
             "source": self.source,
             "confidence": self.confidence,
             "payload": self.payload,
+            "corr_id": self.corr_id,
+            "seq": self.seq,
         }
 
 
@@ -100,6 +111,7 @@ class EventBus(object):
             raise TypeError("EventBus.publish expects Event, got %r" % type(event))
         with self._lock:
             self._seq += 1
+            event.seq = self._seq
             self._history.append(event)
             if len(self._history) > self._history_limit:
                 self._history = self._history[-self._history_limit:]
@@ -112,17 +124,26 @@ class EventBus(object):
                 errors.append((cb, exc))
         return errors
 
-    def emit(self, event_type, source, payload=None, confidence=1.0):
-        event = Event(event_type, source, payload=payload, confidence=confidence)
+    def emit(self, event_type, source, payload=None, confidence=1.0, corr_id=None):
+        event = Event(event_type, source, payload=payload, confidence=confidence,
+                      corr_id=corr_id)
         self.publish(event)
         return event
 
-    def recent(self, limit=50, after_ts=0):
+    def recent(self, limit=50, after_ts=0, after_seq=0):
         with self._lock:
-            items = [e for e in self._history if e.timestamp > after_ts]
+            items = list(self._history)
+        if after_seq:
+            items = [e for e in items if getattr(e, "seq", 0) > after_seq]
+        elif after_ts:
+            items = [e for e in items if e.timestamp > after_ts]
         if limit:
             items = items[-int(limit):]
         return [e.to_dict() for e in items]
+
+    def fill(self):
+        with self._lock:
+            return len(self._history), self._history_limit
 
     @property
     def seq(self):

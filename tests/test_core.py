@@ -3,6 +3,7 @@
 
 from __future__ import print_function
 
+import json
 import os
 import sys
 import tempfile
@@ -15,8 +16,15 @@ if ROOT not in sys.path:
 
 from jetbot_core.config import load_config
 from jetbot_core.events import Event, EventBus, EventType
-from jetbot_core.llm import parse_plan
+from jetbot_core.llm import parse_plan, SYSTEM_PROMPT, LLMClient
 from jetbot_core.agent import Agent, _needs_llm, say_for_tool_results
+from jetbot_core.trace import TraceRecorder
+from jetbot_core.live import LiveSettings
+from jetbot_core.telemetry import (
+    LoopMeter, MotorLedger, TelemetryHub, bind_corr_id, clear_corr_id,
+    get_corr_id, new_corr_id, redact,
+)
+
 from jetbot_core.memory import SemanticMemory
 from jetbot_core.navigation import LocalPlanner
 from jetbot_core.safety import MotionCommand, SafetyController
@@ -589,6 +597,349 @@ class PipelineFixTests(unittest.TestCase):
         out = tools.dispatch("nav.follow", {})
         self.assertFalse(out.get("ok"))
         self.assertEqual(out.get("error"), "unknown_target")
+
+
+class TraceTests(unittest.TestCase):
+    def test_run_and_steps(self):
+        tr = TraceRecorder(max_runs=5)
+        rid = tr.begin_run("web", "go forward")
+        tr.step("intent", "keyword", input={"text": "go forward"}, output={"intent": "forward"}, ok=True)
+        tr.step("tool", "motion.forward", input={"duration": 1.0}, output={"ok": True}, ok=True)
+        tr.end_run(status="ok", say="OK: forward")
+        snap = tr.snapshot()
+        self.assertEqual(snap["runs"][0]["id"], rid)
+        self.assertEqual(snap["runs"][0]["status"], "ok")
+        stages = [s["stage"] for s in snap["runs"][0]["steps"]]
+        self.assertIn("intent", stages)
+        self.assertIn("tool", stages)
+        self.assertEqual(snap["active"], None)
+
+    def test_orphan_asr_is_closed(self):
+        tr = TraceRecorder()
+        tr.step("asr", "whisper", output="hello", ok=True, model="whisper.cpp")
+        snap = tr.snapshot()
+        self.assertEqual(snap["runs"][0]["kind"], "asr")
+        self.assertEqual(snap["runs"][0]["status"], "ok")
+        self.assertEqual(snap["last_asr"]["output"], "hello")
+
+
+class LiveSettingsTests(unittest.TestCase):
+    def test_prompt_applies_to_llm(self):
+        path = tempfile.mkstemp(suffix=".json")[1]
+        live = LiveSettings(path)
+        class Dummy(object):
+            pass
+        rt = Dummy()
+        rt.llm = LLMClient({"llm": {}})
+        rt.agent = Dummy()
+        rt.agent.set_intent_tools = lambda m: None
+        rt.agent.reset_intent_tools = lambda: None
+        rt.agent.set_keyword_map = lambda m: None
+        rt.agent.reset_keyword_map = lambda: None
+        rt.tools = Dummy()
+        rt.tools.set_enabled_map = lambda m: setattr(rt.tools, "enabled", m)
+        rt.tools.tool_docs = {}
+        live.patch({"system_prompt": "You are a test robot."})
+        live.apply(rt)
+        self.assertEqual(rt.llm.system_prompt, "You are a test robot.")
+        live.patch({"system_prompt": None})
+        live.apply(rt)
+        self.assertEqual(rt.llm.system_prompt, SYSTEM_PROMPT)
+
+    def test_disable_tool_blocks_dispatch(self):
+        cfg = load_config(os.path.join(ROOT, "config.yaml"))
+        w = WorldState()
+        bus = EventBus()
+        planner = LocalPlanner(cfg, w, SafetyController(cfg, SimulatedMotors(), w, bus), bus)
+        planner.safety.allow_motion = True
+        tasks = TaskManager(w, bus)
+        tools = ToolRouter(w, planner.safety, planner, FixedServo(), SemanticMemory(tempfile.mkstemp(suffix=".json")[1]), tasks, bus)
+        tools.set_enabled_map({"motion.forward": False})
+        out = tools.dispatch("motion.forward", {"duration": 0.2})
+        self.assertFalse(out.get("ok"))
+        self.assertEqual(out.get("error"), "tool_disabled")
+
+    def test_keyword_override_changes_intent(self):
+        class Dummy(object):
+            pass
+        agent = Agent.__new__(Agent)
+        agent.keyword_map = None
+        agent.typesafe = None
+        agent.set_keyword_map([[["dance"], "scan"]])
+        hit = agent._keyword_intent("dance")
+        self.assertEqual(hit[0], "scan")
+
+
+class TelemetryTests(unittest.TestCase):
+    def test_corr_id_thread_local(self):
+        cid = new_corr_id()
+        prev = bind_corr_id(cid)
+        self.assertEqual(get_corr_id(), cid)
+        clear_corr_id()
+        self.assertIsNone(get_corr_id())
+        self.assertIsNone(prev)
+
+    def test_event_carries_corr_id(self):
+        bind_corr_id("abc123")
+        try:
+            bus = EventBus()
+            ev = bus.emit(EventType.USER_COMMAND, "web", {"text": "hi"})
+            self.assertEqual(ev.corr_id, "abc123")
+            rec = bus.recent(limit=1)[0]
+            self.assertEqual(rec["corr_id"], "abc123")
+            self.assertTrue(rec["seq"] >= 1)
+        finally:
+            clear_corr_id()
+
+    def test_loop_meter_hz(self):
+        meter = LoopMeter("agent", 50, window=20)
+        for _ in range(8):
+            meter.tick()
+            time.sleep(0.01)
+        snap = meter.snapshot()
+        self.assertGreater(snap["ticks"], 1)
+        self.assertGreater(snap["hz"], 20)
+        self.assertFalse(snap["stale"])
+
+    def test_loop_meter_stale(self):
+        meter = LoopMeter("safety", 20)
+        meter.tick()
+        meter.last_ts = time.time() - 1.0
+        snap = meter.snapshot()
+        self.assertTrue(snap["stale"])
+
+    def test_redact_strips_secrets(self):
+        out = redact({"api_key": "sk-secret", "text": "ok", "nested": {"token": "x"}})
+        self.assertEqual(out["api_key"], "<redacted>")
+        self.assertEqual(out["nested"]["token"], "<redacted>")
+        self.assertEqual(out["text"], "ok")
+
+    def test_motor_ledger_phases_distinct(self):
+        led = MotorLedger(limit=8)
+        cmd = MotionCommand(0.2, 0.2, "nav-forward", 0.4, corr_id="c1")
+        led.record("requested", cmd, corr_id="c1")
+        led.record("accepted", cmd, corr_id="c1")
+        led.record("applied", MotionCommand(0.18, 0.18, "nav-forward", 0.4, corr_id="c1"), corr_id="c1")
+        snap = led.snapshot()
+        self.assertEqual(snap["last_requested"]["phase"], "requested")
+        self.assertEqual(snap["last_accepted"]["phase"], "accepted")
+        self.assertEqual(snap["last_applied"]["phase"], "applied")
+        self.assertNotEqual(snap["last_requested"]["left"], snap["last_applied"]["left"])
+        self.assertEqual(len(led.for_corr("c1")), 3)
+
+    def test_motor_ledger_dedupes_applied(self):
+        led = MotorLedger()
+        cmd = MotionCommand(0.1, 0.1, "nav-forward", 0.2, corr_id="c2")
+        led.record("applied", cmd, corr_id="c2")
+        led.record("applied", cmd, corr_id="c2")
+        self.assertEqual(len(led.snapshot(limit=20)["history"]), 1)
+
+    def test_motor_ledger_overflow_bounded(self):
+        led = MotorLedger(limit=5)
+        for i in range(12):
+            led.record("requested", MotionCommand(0.1, 0.1, "t", 0.1, corr_id="x"), corr_id="x")
+        snap = led.snapshot(limit=20)
+        self.assertEqual(len(snap["history"]), 5)
+
+    def test_queue_does_not_imply_applied(self):
+        cfg = load_config(os.path.join(ROOT, "config.yaml"))
+        w = WorldState()
+        bus = EventBus()
+        motors = SimulatedMotors()
+        safety = SafetyController(cfg, motors, w, bus)
+        safety.allow_motion = False
+        tel = TelemetryHub()
+        safety.telemetry = tel
+        bind_corr_id("queued1")
+        try:
+            ok, reason = safety.request(MotionCommand(0.2, 0.2, "nav-forward", 0.4))
+            self.assertFalse(ok)
+            self.assertEqual(reason, "motion_locked")
+            snap = tel.motor.snapshot()
+            self.assertEqual(snap["last_requested"]["corr_id"], "queued1")
+            self.assertEqual(snap["last_rejected"]["reason"], "motion_locked")
+            self.assertIsNone(snap["last_applied"])
+            self.assertEqual(motors.snapshot()["left"], 0.0)
+        finally:
+            clear_corr_id()
+
+    def test_safety_records_requested_accepted_applied(self):
+        cfg = load_config(os.path.join(ROOT, "config.yaml"))
+        w = WorldState(stale_s=0.5)
+        w.update_obstacles(1.5, [0.1, 0.1, 0.1, 0.1, 0.1], False, "front", 0.7, "test")
+        w.set_perception_meta(last_depth_ts=time.time(), last_frame_ts=time.time())
+        motors = SimulatedMotors()
+        bus = EventBus()
+        safety = SafetyController(cfg, motors, w, bus)
+        safety.allow_motion = True
+        tel = TelemetryHub()
+        safety.telemetry = tel
+        bind_corr_id("go1")
+        try:
+            ok, reason = safety.request(MotionCommand(0.2, 0.2, "nav-forward", 0.4))
+            self.assertTrue(ok)
+            self.assertEqual(reason, "ok")
+            safety._loop = safety._loop  # keep attribute
+            # One apply tick without starting the 20 Hz thread.
+            with safety._lock:
+                cmd = safety._command
+            ok2, reason2, safe = safety.validate(cmd)
+            self.assertTrue(ok2)
+            motors.set_speeds(safe.left, safe.right)
+            tel.motor.record("applied", MotionCommand(safe.left, safe.right, cmd.source, 0, corr_id="go1"),
+                             corr_id="go1")
+            snap = tel.motor.snapshot()
+            self.assertEqual(snap["last_requested"]["corr_id"], "go1")
+            self.assertEqual(snap["last_accepted"]["corr_id"], "go1")
+            self.assertEqual(snap["last_applied"]["corr_id"], "go1")
+            self.assertGreater(abs(snap["last_applied"]["left"] or 0), 0)
+        finally:
+            clear_corr_id()
+
+    def test_estop_rejects_without_ui_control(self):
+        cfg = load_config(os.path.join(ROOT, "config.yaml"))
+        w = WorldState()
+        w.update_obstacles(1.5, [0.1] * 5, False, "front", 0.7, "test")
+        w.set_perception_meta(last_depth_ts=time.time())
+        bus = EventBus()
+        safety = SafetyController(cfg, SimulatedMotors(), w, bus)
+        safety.allow_motion = True
+        tel = TelemetryHub()
+        safety.telemetry = tel
+        safety.emergency_stop("test")
+        ok, reason = safety.request(MotionCommand(0.2, 0.2, "nav-forward", 0.3, corr_id="e1"))
+        self.assertFalse(ok)
+        self.assertEqual(reason, "estop")
+        self.assertEqual(tel.motor.last_rejected["reason"], "estop")
+
+    def test_trace_propagates_corr_id(self):
+        bind_corr_id("run9")
+        try:
+            tr = TraceRecorder()
+            rid = tr.begin_run("web", "go forward", corr_id="run9")
+            tr.step("intent", "keyword", ok=True)
+            tr.step("tool", "motion.forward", ok=True)
+            tr.end_run(status="ok")
+            snap = tr.snapshot()
+            self.assertEqual(snap["runs"][0]["id"], rid)
+            self.assertEqual(snap["runs"][0]["corr_id"], "run9")
+            self.assertEqual(snap["runs"][0]["steps"][0]["corr_id"], "run9")
+        finally:
+            clear_corr_id()
+
+    def test_pipeline_snapshot_has_three_views(self):
+        # Stub runtime — do not construct JetBotRuntime (that opens CSI / LLM).
+        from jetbot_core.health import HealthMonitor
+        cfg = load_config(os.path.join(ROOT, "config.yaml"))
+        w = WorldState()
+        bus = EventBus()
+        motors = SimulatedMotors()
+        safety = SafetyController(cfg, motors, w, bus)
+        safety.allow_motion = False
+        tel = TelemetryHub()
+        safety.telemetry = tel
+        tracer = TraceRecorder()
+
+        class _Live(object):
+            updated_ts = 0.0
+
+        class _Tasks(object):
+            state = "IDLE"
+            def snapshot(self):
+                return {"state": "IDLE", "name": None}
+
+        class _Rt(object):
+            pass
+
+        rt = _Rt()
+        rt.health = HealthMonitor(w)
+        rt.telemetry = tel
+        rt.safety = safety
+        rt.planner = None
+        rt.agent = None
+        rt.perception = None
+        rt.camera = None
+        rt.motors = motors
+        rt.servo = None
+        rt.world = w
+        rt.tools = None
+        rt.llm = None
+        rt.typesafe = None
+        rt.whisper = None
+        rt.memory = None
+        rt.tasks = _Tasks()
+        rt.tracer = tracer
+        rt.bus = bus
+        rt.meter = LoopMeter("telemetry", 2)
+        rt.live = _Live()
+        rt.started_at = time.time()
+        snap = tel.snapshot(rt)
+        self.assertIn("dashboard", snap)
+        self.assertIn("pipeline", snap)
+        self.assertIn("trace", snap)
+        self.assertIn("loops", snap["dashboard"])
+        self.assertIn("motor", snap["dashboard"])
+        ids = [n["id"] for n in snap["pipeline"]["nodes"]]
+        for need in ("camera", "perception", "world", "planner", "safety", "motors",
+                     "agent", "llm", "tools", "task"):
+            self.assertIn(need, ids)
+        safety_node = [n for n in snap["pipeline"]["nodes"] if n["id"] == "safety"][0]
+        self.assertEqual(safety_node["status"], "locked")
+        self.assertIs(safety.telemetry, tel)
+        self.assertIsNone(snap["dashboard"]["motor"]["last_applied"])
+        json.dumps(snap, default=str)  # must serialize for /api/pipeline
+
+    def test_monitor_is_read_only_for_motion(self):
+        with open(os.path.join(ROOT, "jetbot_core", "monitor.py")) as handle:
+            src = handle.read()
+        self.assertNotIn("emergency_stop", src)
+        self.assertNotIn("set_speeds", src)
+        self.assertNotIn("set_allow_motion", src)
+        self.assertIn("pipeline_snapshot", src)
+
+    def test_disconnected_client_does_not_block_safety(self):
+        cfg = load_config(os.path.join(ROOT, "config.yaml"))
+        w = WorldState()
+        w.update_obstacles(1.4, [0.1] * 5, False, "front", 0.7, "test")
+        w.set_perception_meta(last_depth_ts=time.time())
+        motors = SimulatedMotors()
+        bus = EventBus()
+        safety = SafetyController(cfg, motors, w, bus)
+        safety.allow_motion = True
+        tel = TelemetryHub()
+        safety.telemetry = tel
+        t0 = time.time()
+        for _ in range(30):
+            safety.request(MotionCommand(0.15, 0.15, "nav-forward", 0.2))
+        elapsed = time.time() - t0
+        self.assertLess(elapsed, 0.2)
+
+    def test_agent_submit_does_not_mark_tool_ok(self):
+        cfg = load_config(os.path.join(ROOT, "config.yaml"))
+        w = WorldState()
+        bus = EventBus()
+        agent = Agent.__new__(Agent)
+        agent._lock = __import__("threading").Lock()
+        agent._pending = []
+        agent.bus = bus
+        item = Agent.submit(agent, "go forward", source="monitor")
+        self.assertTrue(item["corr_id"])
+        self.assertEqual(len(agent._pending), 1)
+        self.assertEqual(bus.recent(limit=1)[0]["type"], EventType.USER_COMMAND)
+
+
+class HostTelemetryTests(unittest.TestCase):
+    def test_cpu_pct_second_sample(self):
+        from jetbot_core.health import host_telemetry
+        first = host_telemetry()
+        time.sleep(0.05)
+        second = host_telemetry()
+        self.assertIn("cpu_pct", first)
+        self.assertIn("load1", second)
+        self.assertIn("mem_avail_mb", second)
+        if second.get("cpu_pct") is not None:
+            self.assertGreaterEqual(second["cpu_pct"], 0.0)
+            self.assertLessEqual(second["cpu_pct"], 100.0)
 
 
 if __name__ == "__main__":

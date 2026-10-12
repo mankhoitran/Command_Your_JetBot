@@ -14,6 +14,7 @@ except ImportError:
 DEFAULTS = {
     "robot": {"name": "jetbot-nano", "simulate_if_missing": True, "allow_motion": False},
     "web": {"host": "0.0.0.0", "port": 8080, "jpeg_quality": 60, "mjpeg_fps": 12},
+    "monitor": {"enabled": True, "port": 8090, "ssl_enabled": True, "live_path": "data/live_settings.json"},
     "camera": {
         "width": 320,
         "height": 240,
@@ -112,6 +113,7 @@ DEFAULTS = {
 _ENV_MAP = {
     "JETBOT_WEB_PORT": ("web", "port", int),
     "JETBOT_WEB_HOST": ("web", "host", str),
+    "JETBOT_MONITOR_PORT": ("monitor", "port", int),
     "JETBOT_LLM_URL": ("llm", "base_url", str),
     "JETBOT_LLM_MODEL": ("llm", "model", str),
     "JETBOT_WHISPER_URL": ("whisper", "base_url", str),

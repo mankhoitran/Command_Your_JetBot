@@ -20,6 +20,8 @@ class WhisperClient(object):
         self.timeout = float(w.get("timeout_s", 45))
         self.ok = False
         self.last_error = None
+        self.tracer = None
+        self.last_text = None
 
     def health(self):
         if requests is None:
@@ -37,28 +39,50 @@ class WhisperClient(object):
     def transcribe_bytes(self, audio_bytes, filename="speech.wav"):
         if requests is None:
             return None, "requests missing"
+        import time as _t
         url = self.base_url + "/inference"
         files = {"file": (filename, audio_bytes, "application/octet-stream")}
         data = {"temperature": "0.0", "response_format": "json"}
+        t0 = _t.time()
         try:
             resp = requests.post(url, files=files, data=data, timeout=self.timeout)
+            latency = _t.time() - t0
             if resp.status_code >= 400:
                 self.ok = False
                 self.last_error = "http %s %s" % (resp.status_code, resp.text[:160])
+                if self.tracer is not None:
+                    self.tracer.step("asr", "whisper", ok=False, error=self.last_error,
+                                     model="whisper.cpp", latency_s=latency,
+                                     extra={"bytes": len(audio_bytes or b""), "filename": filename})
                 return None, self.last_error
             self.ok = True
             self.last_error = None
             try:
                 payload = resp.json()
             except Exception:
-                return resp.text.strip(), None
+                text = resp.text.strip()
+                self.last_text = text
+                if self.tracer is not None:
+                    self.tracer.step("asr", "whisper", ok=True, output=text,
+                                     model="whisper.cpp", latency_s=latency,
+                                     extra={"bytes": len(audio_bytes or b""), "filename": filename})
+                return text, None
             text = payload.get("text") or payload.get("transcription") or payload.get("data") or ""
             if isinstance(text, dict):
                 text = text.get("text") or ""
-            return (text or "").strip(), None
+            text = (text or "").strip()
+            self.last_text = text
+            if self.tracer is not None:
+                self.tracer.step("asr", "whisper", ok=True, output=text,
+                                 model="whisper.cpp", latency_s=latency,
+                                 extra={"bytes": len(audio_bytes or b""), "filename": filename})
+            return text, None
         except Exception as exc:
             self.ok = False
             self.last_error = str(exc)
+            if self.tracer is not None:
+                self.tracer.step("asr", "whisper", ok=False, error=str(exc),
+                                 model="whisper.cpp", latency_s=_t.time() - t0)
             return None, self.last_error
 
     def transcribe_file(self, path):

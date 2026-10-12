@@ -37,12 +37,32 @@ class ToolRouter(object):
         self._scanning = False
         self.last_say = ""
         self.servo_enabled = bool(getattr(servo, "enabled", False))
+        self.tracer = None
+        self.tool_enabled = {}
+        self.tool_docs = {}
+
+    def set_enabled_map(self, mapping):
+        self.tool_enabled = dict((str(k), bool(v)) for k, v in (mapping or {}).items())
+
+    def is_enabled(self, name):
+        if not self.tool_enabled:
+            return True
+        if name not in self.tool_enabled:
+            return True
+        return bool(self.tool_enabled[name])
 
     def dispatch(self, name, args=None):
         args = args or {}
         name = str(name).strip()
+        t0 = time.time()
+        if not self.is_enabled(name):
+            result = {"ok": False, "tool": name, "error": "tool_disabled"}
+            self._trace_tool(name, args, result, t0)
+            return result
         if self.world.obstacles_view()["robot"]["estop"] and name not in ("motion.stop", "task.fail", "task.complete"):
-            return {"ok": False, "tool": name, "error": "estop"}
+            result = {"ok": False, "tool": name, "error": "estop"}
+            self._trace_tool(name, args, result, t0)
+            return result
         motion_like = (
             name.startswith("motion.")
             or name in ("nav.go_to", "nav.follow", "camera.look_left", "camera.look_right")
@@ -54,7 +74,9 @@ class ToolRouter(object):
                 })
             except Exception:
                 pass
-            return {"ok": False, "tool": name, "error": "recovery_active"}
+            result = {"ok": False, "tool": name, "error": "recovery_active"}
+            self._trace_tool(name, args, result, t0)
+            return result
         if motion_like and name != "motion.stop":
             allow = True
             try:
@@ -68,7 +90,9 @@ class ToolRouter(object):
                     })
                 except Exception:
                     pass
-                return {"ok": False, "tool": name, "error": "motion_locked"}
+                result = {"ok": False, "tool": name, "error": "motion_locked"}
+                self._trace_tool(name, args, result, t0)
+                return result
         handler = {
             "motion.forward": self._forward,
             "motion.backward": self._backward,
@@ -90,7 +114,9 @@ class ToolRouter(object):
             "task.fail": self._fail,
         }.get(name)
         if handler is None:
-            return {"ok": False, "error": "unknown tool %s" % name}
+            result = {"ok": False, "error": "unknown tool %s" % name, "tool": name}
+            self._trace_tool(name, args, result, t0)
+            return result
         try:
             result = handler(args)
             if result is None:
@@ -98,10 +124,31 @@ class ToolRouter(object):
             elif isinstance(result, dict) and "ok" not in result:
                 result["ok"] = True
             result["tool"] = name
+            self._trace_tool(name, args, result, t0)
             return result
         except Exception as exc:
             log.exception("tool %s failed", name)
-            return {"ok": False, "tool": name, "error": str(exc)}
+            result = {"ok": False, "tool": name, "error": str(exc)}
+            self._trace_tool(name, args, result, t0)
+            return result
+
+    def _trace_tool(self, name, args, result, t0):
+        if self.tracer is None:
+            return
+        try:
+            from .telemetry import get_corr_id
+            corr_id = get_corr_id()
+            if isinstance(result, dict) and corr_id and "corr_id" not in result:
+                result["corr_id"] = corr_id
+            self.tracer.step(
+                "tool", name, input=args, output=result,
+                ok=bool(result.get("ok")) if isinstance(result, dict) else None,
+                error=(result or {}).get("error") if isinstance(result, dict) else None,
+                latency_s=time.time() - t0,
+                extra={"corr_id": corr_id} if corr_id else None,
+            )
+        except Exception:
+            pass
 
     def _duration(self, args, default=1.0):
         try:

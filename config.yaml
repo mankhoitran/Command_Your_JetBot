@@ -12,6 +12,19 @@ web:
   port: 8080
   jpeg_quality: 60
   mjpeg_fps: 12
+  # HTTPS so browsers grant microphone (secure context) over LAN.
+  # Self-signed cert is auto-generated into data/ssl/ on first start.
+  # Browsers will warn once; accept/continue to reach the console.
+  ssl_enabled: true
+  ssl_cert: data/ssl/cert.pem
+  ssl_key: data/ssl/key.pem
+
+monitor:
+  enabled: true
+  port: 8090
+  # Same cert as the console (secure context over LAN).
+  ssl_enabled: true
+  live_path: data/live_settings.json
 
 camera:
   width: 320

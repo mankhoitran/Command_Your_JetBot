@@ -126,10 +126,18 @@ class JetBotHandler(BaseHTTPRequestHandler):
             self.runtime.safety.clear_estop(source="http")
             return self._send(200, _json_bytes({"ok": True, "estop": False}))
         if path == "/api/command":
+            from .telemetry import bind_corr_id, clear_corr_id, new_corr_id
             data = _parse_body(raw, ctype)
             text = data.get("text") or data.get("command") or ""
-            self.runtime.agent.submit(text, source="web")
-            return self._send(200, _json_bytes({"ok": True, "accepted": text[:200]}))
+            corr_id = new_corr_id()
+            bind_corr_id(corr_id)
+            try:
+                self.runtime.agent.submit(text, source="web")
+            finally:
+                clear_corr_id()
+            return self._send(200, _json_bytes({
+                "ok": True, "accepted": text[:200], "corr_id": corr_id,
+            }))
         if path == "/api/manual":
             data = _parse_body(raw, ctype)
             result = self.runtime.handle_manual(data.get("action"), data)
@@ -157,6 +165,8 @@ class JetBotHandler(BaseHTTPRequestHandler):
         self._send(404, _json_bytes({"error": "not found"}))
 
     def _whisper(self, raw, ctype):
+        if ctype in ("application/json", "application/x-www-form-urlencoded", "text/plain"):
+            return self._send(400, _json_bytes({"ok": False, "error": "no audio"}))
         audio = None
         filename = "speech.wav"
         if ctype.startswith("multipart/"):
@@ -178,13 +188,20 @@ class JetBotHandler(BaseHTTPRequestHandler):
             audio = raw
         if not audio:
             return self._send(400, _json_bytes({"ok": False, "error": "no audio"}))
-        text, err = self.runtime.whisper.transcribe_bytes(audio, filename=filename)
-        if err:
-            self.runtime.bus.emit(EventType.WHISPER_UNAVAILABLE, "whisper", {"error": err})
-            return self._send(502, _json_bytes({"ok": False, "error": err}))
-        if text:
-            self.runtime.agent.submit(text, source="whisper")
-        return self._send(200, _json_bytes({"ok": True, "text": text}))
+        from .telemetry import bind_corr_id, clear_corr_id, new_corr_id
+        corr_id = new_corr_id()
+        bind_corr_id(corr_id)
+        try:
+            text, err = self.runtime.whisper.transcribe_bytes(audio, filename=filename)
+            if err:
+                self.runtime.bus.emit(EventType.WHISPER_UNAVAILABLE, "whisper", {"error": err},
+                                      corr_id=corr_id)
+                return self._send(502, _json_bytes({"ok": False, "error": err, "corr_id": corr_id}))
+            if text:
+                self.runtime.agent.submit(text, source="whisper")
+            return self._send(200, _json_bytes({"ok": True, "text": text, "corr_id": corr_id}))
+        finally:
+            clear_corr_id()
 
     def _mjpeg(self):
         self.send_response(200)
@@ -256,10 +273,75 @@ def _parse_body(raw, ctype):
         return {}
 
 
+def _local_ips():
+    ips = set(["127.0.0.1"])
+    try:
+        import socket as _sock
+        s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ips.add(s.getsockname()[0])
+        finally:
+            s.close()
+        for info in _sock.getaddrinfo(_sock.gethostname(), None, _sock.AF_INET):
+            ips.add(info[4][0])
+    except Exception:
+        pass
+    return sorted(ips)
+
+
+def ensure_self_signed_cert(cert_path, key_path):
+    """Create a self-signed cert for HTTPS (mic needs a secure context)."""
+    import subprocess
+    if os.path.isfile(cert_path) and os.path.isfile(key_path):
+        return cert_path, key_path
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(cert_path)), exist_ok=True)
+    except TypeError:
+        # Python 3.6: exist_ok not supported by os.makedirs? It is (3.2+). Keep guard.
+        parent = os.path.dirname(os.path.abspath(cert_path))
+        if not os.path.isdir(parent):
+            os.makedirs(parent)
+    san = ",".join(["DNS:jetbot", "DNS:jetbot.local", "DNS:localhost"] +
+                   ["IP:%s" % ip for ip in _local_ips()])
+    cmd = [
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", key_path, "-out", cert_path, "-days", "825",
+        "-subj", "/CN=jetbot-console",
+        "-addext", "subjectAltName=%s" % san,
+    ]
+    try:
+        subprocess.check_call(cmd, stdout=open(os.devnull, "w"), stderr=subprocess.STDOUT)
+    except Exception:
+        # OpenSSL 1.1.1 supports -addext (1.1.1+); fall back without SAN.
+        cmd = [c for c in cmd if not c.startswith("subjectAltName")]
+        idx = cmd.index("-addext")
+        del cmd[idx:idx + 2]
+        subprocess.check_call(cmd, stdout=open(os.devnull, "w"), stderr=subprocess.STDOUT)
+    log.info("Generated self-signed HTTPS cert %s", cert_path)
+    return cert_path, key_path
+
+
 def serve(runtime, host="0.0.0.0", port=8080):
     JetBotHandler.runtime = runtime
     JetBotHandler.jpeg_quality = int(runtime.cfg.get("web", {}).get("jpeg_quality", 60))
     JetBotHandler.mjpeg_fps = int(runtime.cfg.get("web", {}).get("mjpeg_fps", 12))
     server = ThreadedHTTPServer((host, int(port)), JetBotHandler)
-    log.info("Web console on http://%s:%s", host, port)
+    web_cfg = runtime.cfg.get("web", {})
+    if web_cfg.get("ssl_enabled", False):
+        import ssl
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cert = web_cfg.get("ssl_cert", "data/ssl/cert.pem")
+        key = web_cfg.get("ssl_key", "data/ssl/key.pem")
+        if not os.path.isabs(cert):
+            cert = os.path.join(root, cert)
+        if not os.path.isabs(key):
+            key = os.path.join(root, key)
+        ensure_self_signed_cert(cert, key)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(cert, key)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        log.info("Web console on https://%s:%s (self-signed cert)", host, port)
+    else:
+        log.info("Web console on http://%s:%s", host, port)
     return server

@@ -175,6 +175,11 @@ class LLMClient(object):
         self.last_latency_s = 0.0
         self.last_raw = None
         self.last_finish_reason = None
+        self.system_prompt = SYSTEM_PROMPT
+        self.allowed_tools = list(ALLOWED_TOOLS)
+        self.tracer = None
+        self.last_request = None
+        self.last_response = None
 
     def health(self):
         if requests is None:
@@ -204,6 +209,10 @@ class LLMClient(object):
         if requests is None:
             return None, "requests missing"
         import time as _t
+        user_content = (
+            "Instruction:\n%s\n\nWorld:\n%s\n\n%s\n%s"
+            % (user_text, world_summary, memory_summary, extra or "")
+        )
         payload = {
             "model": self.model,
             "temperature": self.temperature,
@@ -211,14 +220,16 @@ class LLMClient(object):
             "chat_template_kwargs": {"enable_thinking": self.enable_thinking},
             "response_format": {"type": "json_object"},
             "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": (
-                    "Instruction:\n%s\n\nWorld:\n%s\n\n%s\n%s"
-                    % (user_text, world_summary, memory_summary, extra or "")
-                )},
+                {"role": "system", "content": self.system_prompt or SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
             ],
         }
         url = self.base_url + "/chat/completions"
+        self.last_request = {
+            "url": url,
+            "model": self.model,
+            "messages": payload["messages"],
+        }
         t0 = _t.time()
         try:
             resp = requests.post(url, json=payload, timeout=self.timeout)
@@ -227,6 +238,15 @@ class LLMClient(object):
                 self.ok = False
                 self.last_error = "http %s %s" % (resp.status_code, resp.text[:200])
                 self.last_raw = resp.text[:400]
+                self.last_response = self.last_raw
+                if self.tracer is not None:
+                    self.tracer.step(
+                        "llm", self.model, ok=False, error=self.last_error,
+                        model=self.model, latency_s=self.last_latency_s,
+                        input={"user": user_text, "world": world_summary,
+                               "memory": memory_summary, "system_chars": len(self.system_prompt or "")},
+                        output=self.last_raw,
+                    )
                 return None, self.last_error
             data = resp.json()
             choice = (data.get("choices") or [{}])[0]
@@ -237,26 +257,44 @@ class LLMClient(object):
                 # Gemma-IT can dump the whole budget into reasoning_content.
                 text = msg.get("reasoning_content") or ""
             self.last_raw = (text or "")[:800]
+            self.last_response = text
             self.ok = True
             self.last_error = None
-            plan = parse_plan(text)
+            plan = parse_plan(text, allowed=self.allowed_tools)
             if self.last_finish_reason == "length" and not plan.get("tools"):
                 log.warning("LLM truncated (finish=length); repaired=%s", bool(plan.get("tools")))
+            if self.tracer is not None:
+                self.tracer.step(
+                    "llm", self.model, ok=True, model=self.model,
+                    latency_s=self.last_latency_s,
+                    input={"user": user_text, "world": world_summary,
+                           "memory": memory_summary, "extra": extra,
+                           "system_chars": len(self.system_prompt or "")},
+                    output={"raw": (text or "")[:1200], "plan": plan,
+                            "finish_reason": self.last_finish_reason},
+                )
             return plan, None
         except Exception as exc:
             self.last_latency_s = _t.time() - t0
             self.ok = False
             self.last_error = str(exc)
+            self.last_response = str(exc)
+            if self.tracer is not None:
+                self.tracer.step(
+                    "llm", self.model, ok=False, error=str(exc),
+                    model=self.model, latency_s=self.last_latency_s,
+                    input={"user": user_text},
+                )
             return None, self.last_error
 
 
-def parse_plan(text):
+def parse_plan(text, allowed=None):
     if not text:
         return _empty_plan("empty llm")
     blob = _strip_fences(text)
     start = blob.find("{")
     if start < 0:
-        recovered = _recover_plan(text, reason="unstructured")
+        recovered = _recover_plan(text, reason="unstructured", allowed=allowed)
         if recovered.get("tools") or recovered.get("say"):
             return recovered
         return {
@@ -271,15 +309,15 @@ def parse_plan(text):
     candidate = blob[start:]
     data = _loads_maybe_repaired(candidate)
     if data is None:
-        recovered = _recover_plan(text, reason="json parse failed")
+        recovered = _recover_plan(text, reason="json parse failed", allowed=allowed)
         if recovered.get("tools") or (recovered.get("say") and recovered["say"] != "I could not parse a plan."):
             return recovered
         return _empty_plan("json parse failed", raw=text)
     tools = data.get("tools") or []
-    clean = _clean_tools(tools)
+    clean = _clean_tools(tools, allowed=allowed)
     if not clean:
         # Truncation often leaves a partial tool name; recover from raw text.
-        extra = _extract_tools(text)
+        extra = _extract_tools(text, allowed=allowed)
         for tool in extra:
             if tool not in clean:
                 clean.append(tool)
@@ -363,7 +401,12 @@ def _close_json(text):
     return "".join(out)
 
 
-def _clean_tools(tools):
+def _allowed(allowed):
+    return tuple(allowed) if allowed else ALLOWED_TOOLS
+
+
+def _clean_tools(tools, allowed=None):
+    allowed = _allowed(allowed)
     clean = []
     if not isinstance(tools, list):
         return clean
@@ -374,9 +417,9 @@ def _clean_tools(tools):
         if not name:
             continue
         name = str(name).strip()
-        if name not in ALLOWED_TOOLS:
+        if name not in allowed:
             # Truncated names like "camera." still hint at a scan.
-            if name.startswith("camera"):
+            if name.startswith("camera") and "camera.scan_environment" in allowed:
                 name = "camera.scan_environment"
             elif name.startswith("motion"):
                 continue
@@ -399,14 +442,15 @@ def _extract_say(text):
         return match.group(1)
 
 
-def _extract_tools(text):
+def _extract_tools(text, allowed=None):
+    allowed = _allowed(allowed)
     names = re.findall(r'"name"\s*:\s*"([^"]+)"', text)
     clean = []
     seen = set()
     for name in names:
         name = name.strip()
-        if name not in ALLOWED_TOOLS:
-            if name.startswith("camera"):
+        if name not in allowed:
+            if name.startswith("camera") and "camera.scan_environment" in allowed:
                 name = "camera.scan_environment"
             else:
                 continue
@@ -417,9 +461,9 @@ def _extract_tools(text):
     return clean
 
 
-def _recover_plan(text, reason):
+def _recover_plan(text, reason, allowed=None):
     say = _extract_say(text) or "I could not parse a plan."
-    tools = _extract_tools(text)
+    tools = _extract_tools(text, allowed=allowed)
     return {
         "say": say[:240],
         "reason": reason,

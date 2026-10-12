@@ -60,6 +60,8 @@ class PerceptionPipeline(object):
         self.enable_det = bool(self.cfg.get("enable_detection", True))
         self._last_bins = []
         self._last_front = None
+        from ..telemetry import LoopMeter
+        self.meter = LoopMeter("perception", 1.0 / max(0.05, self.depth_interval))
 
     def start(self):
         if self._thread is not None:
@@ -84,6 +86,10 @@ class PerceptionPipeline(object):
                 continue
             last_seq = seq
             now = time.time()
+            try:
+                self.meter.tick()
+            except Exception:
+                pass
             self.world.set_perception_meta(frame_seq=seq, last_frame_ts=ts, latency_ms=(now - ts) * 1000.0)
             small = cv2.resize(frame, (self.inf_w, self.inf_h))
             overlay = frame

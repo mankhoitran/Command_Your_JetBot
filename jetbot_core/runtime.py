@@ -23,6 +23,9 @@ from .safety import MotionCommand, SafetyController
 from .spatial import SpatialMemory
 from .task import TaskManager
 from .tools import ToolRouter
+from .trace import TraceRecorder
+from .live import LiveSettings
+from .telemetry import LoopMeter, TelemetryHub, bind_corr_id, clear_corr_id, new_corr_id
 from .typesafe_client import TypeSafeClient
 from .whisper_client import WhisperClient
 from .world import WorldState
@@ -78,6 +81,25 @@ class JetBotRuntime(object):
             self.tasks, self.memory, self.typesafe, self.health,
             safety=self.safety, planner=self.planner, spatial=self.spatial,
         )
+        self.tracer = TraceRecorder()
+        self.agent.tracer = self.tracer
+        self.tools.tracer = self.tracer
+        self.llm.tracer = self.tracer
+        self.whisper.tracer = self.tracer
+        self.typesafe.tracer = self.tracer
+        self.telemetry = TelemetryHub()
+        self.safety.telemetry = self.telemetry
+        self.bus.subscribe(None, self.telemetry.on_event)
+        telem_hz = float(cfg.get("loops", {}).get("telemetry_hz", 2))
+        self.meter = LoopMeter("telemetry", telem_hz)
+        live_path = cfg.get("monitor", {}).get("live_path", "data/live_settings.json")
+        if not os.path.isabs(live_path):
+            live_path = os.path.join(root, live_path)
+        self.live = LiveSettings(live_path)
+        try:
+            self.live.apply(self)
+        except Exception:
+            log.exception("live settings apply failed")
         self._stop = threading.Event()
         self._telem = None
         self.started_at = time.time()
@@ -134,6 +156,10 @@ class JetBotRuntime(object):
         hz = float(self.cfg.get("loops", {}).get("telemetry_hz", 2))
         period = 1.0 / max(0.5, hz)
         while not self._stop.is_set():
+            try:
+                self.meter.tick()
+            except Exception:
+                pass
             host = host_telemetry()
             self.health.set("host", True, "ok", extra=host)
             servo = self.servo.snapshot()
@@ -170,9 +196,20 @@ class JetBotRuntime(object):
             "allow_motion": bool(self.safety.allow_motion),
         }
 
+    def pipeline_snapshot(self):
+        """Three-view monitor payload. Derived from real instrumentation."""
+        return self.telemetry.snapshot(self)
+
     def handle_manual(self, action, extra=None):
         extra = extra or {}
         action = str(action or "").lower()
+        bind_corr_id(new_corr_id())
+        try:
+            return self._handle_manual(action, extra)
+        finally:
+            clear_corr_id()
+
+    def _handle_manual(self, action, extra):
         if action in ("estop", "emergency_stop", "stop_now"):
             self.safety.emergency_stop(source="ui")
             return {"ok": True, "action": "estop"}

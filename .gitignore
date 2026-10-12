@@ -59,6 +59,8 @@ data/ssl/
 data/*.json
 data/*.db
 data/*.sqlite*
+data/ssl/
+data/live_settings.json
 !data/.gitkeep
 
 # Reference clones (patterns only, not vendored code)
@@ -74,8 +76,11 @@ Thumbs.db
 *.swo
 *~
 
-
 #Docs
 docs/
 
+
+
+# API Key/ Github Token
+/data/github_key.txt
 

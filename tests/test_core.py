@@ -15,8 +15,10 @@ if ROOT not in sys.path:
 
 from jetbot_core.config import load_config
 from jetbot_core.events import Event, EventBus, EventType
-from jetbot_core.llm import parse_plan
+from jetbot_core.llm import parse_plan, SYSTEM_PROMPT, LLMClient
 from jetbot_core.agent import Agent, _needs_llm, say_for_tool_results
+from jetbot_core.trace import TraceRecorder
+from jetbot_core.live import LiveSettings
 from jetbot_core.memory import SemanticMemory
 from jetbot_core.navigation import LocalPlanner
 from jetbot_core.safety import MotionCommand, SafetyController
@@ -589,6 +591,77 @@ class PipelineFixTests(unittest.TestCase):
         out = tools.dispatch("nav.follow", {})
         self.assertFalse(out.get("ok"))
         self.assertEqual(out.get("error"), "unknown_target")
+
+
+class TraceTests(unittest.TestCase):
+    def test_run_and_steps(self):
+        tr = TraceRecorder(max_runs=5)
+        rid = tr.begin_run("web", "go forward")
+        tr.step("intent", "keyword", input={"text": "go forward"}, output={"intent": "forward"}, ok=True)
+        tr.step("tool", "motion.forward", input={"duration": 1.0}, output={"ok": True}, ok=True)
+        tr.end_run(status="ok", say="OK: forward")
+        snap = tr.snapshot()
+        self.assertEqual(snap["runs"][0]["id"], rid)
+        self.assertEqual(snap["runs"][0]["status"], "ok")
+        stages = [s["stage"] for s in snap["runs"][0]["steps"]]
+        self.assertIn("intent", stages)
+        self.assertIn("tool", stages)
+        self.assertEqual(snap["active"], None)
+
+    def test_orphan_asr_is_closed(self):
+        tr = TraceRecorder()
+        tr.step("asr", "whisper", output="hello", ok=True, model="whisper.cpp")
+        snap = tr.snapshot()
+        self.assertEqual(snap["runs"][0]["kind"], "asr")
+        self.assertEqual(snap["runs"][0]["status"], "ok")
+        self.assertEqual(snap["last_asr"]["output"], "hello")
+
+
+class LiveSettingsTests(unittest.TestCase):
+    def test_prompt_applies_to_llm(self):
+        path = tempfile.mkstemp(suffix=".json")[1]
+        live = LiveSettings(path)
+        class Dummy(object):
+            pass
+        rt = Dummy()
+        rt.llm = LLMClient({"llm": {}})
+        rt.agent = Dummy()
+        rt.agent.set_intent_tools = lambda m: None
+        rt.agent.reset_intent_tools = lambda: None
+        rt.agent.set_keyword_map = lambda m: None
+        rt.agent.reset_keyword_map = lambda: None
+        rt.tools = Dummy()
+        rt.tools.set_enabled_map = lambda m: setattr(rt.tools, "enabled", m)
+        rt.tools.tool_docs = {}
+        live.patch({"system_prompt": "You are a test robot."})
+        live.apply(rt)
+        self.assertEqual(rt.llm.system_prompt, "You are a test robot.")
+        live.patch({"system_prompt": None})
+        live.apply(rt)
+        self.assertEqual(rt.llm.system_prompt, SYSTEM_PROMPT)
+
+    def test_disable_tool_blocks_dispatch(self):
+        cfg = load_config(os.path.join(ROOT, "config.yaml"))
+        w = WorldState()
+        bus = EventBus()
+        planner = LocalPlanner(cfg, w, SafetyController(cfg, SimulatedMotors(), w, bus), bus)
+        planner.safety.allow_motion = True
+        tasks = TaskManager(w, bus)
+        tools = ToolRouter(w, planner.safety, planner, FixedServo(), SemanticMemory(tempfile.mkstemp(suffix=".json")[1]), tasks, bus)
+        tools.set_enabled_map({"motion.forward": False})
+        out = tools.dispatch("motion.forward", {"duration": 0.2})
+        self.assertFalse(out.get("ok"))
+        self.assertEqual(out.get("error"), "tool_disabled")
+
+    def test_keyword_override_changes_intent(self):
+        class Dummy(object):
+            pass
+        agent = Agent.__new__(Agent)
+        agent.keyword_map = None
+        agent.typesafe = None
+        agent.set_keyword_map([[["dance"], "scan"]])
+        hit = agent._keyword_intent("dance")
+        self.assertEqual(hit[0], "scan")
 
 
 if __name__ == "__main__":

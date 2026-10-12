@@ -10,6 +10,7 @@ from __future__ import print_function
 import json
 import logging
 import os
+import time
 
 try:
     from urllib.error import HTTPError, URLError
@@ -71,6 +72,9 @@ class TypeSafeClient(object):
         self.last_error = None
         self.ok = False
         self.last_model = None
+        self.tracer = None
+        self.last_request = None
+        self.last_response = None
 
     def _headers(self):
         return {
@@ -136,6 +140,8 @@ class TypeSafeClient(object):
                 },
             },
         }
+        self.last_request = body
+        t0 = time.time()
         try:
             data = _http_json("POST", self.api_url, self._headers(), body, timeout=self.timeout)
             answers = data.get("answers") or {}
@@ -144,15 +150,30 @@ class TypeSafeClient(object):
             self.ok = True
             self.last_error = None
             self.last_model = data.get("model")
-            return {
+            result = {
                 "intent": intent.get("choice"),
                 "confidence": float(intent.get("confidence") or 0.0),
                 "probabilities": intent.get("probabilities") or {},
                 "needs_confirm": float(noul.get("noul") or 0.0),
                 "model": data.get("model") or self.model,
             }
+            self.last_response = result
+            if self.tracer is not None:
+                self.tracer.step(
+                    "typesafe", result.get("model") or self.model,
+                    input={"text": text}, output=result, ok=True,
+                    model=result.get("model"), latency_s=time.time() - t0,
+                )
+            return result
         except Exception as exc:
             self.ok = False
             self.last_error = str(exc)
+            self.last_response = str(exc)
             log.warning("Jev/OpenRouter unavailable: %s", exc)
+            if self.tracer is not None:
+                self.tracer.step(
+                    "typesafe", self.model, input={"text": text},
+                    ok=False, error=str(exc), model=self.model,
+                    latency_s=time.time() - t0,
+                )
             return None

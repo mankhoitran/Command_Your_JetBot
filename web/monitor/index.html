@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>JetBot Pipeline Monitor</title>
+  <link rel="stylesheet" href="/monitor.css"/>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark"></span>
+      <div>
+        <h1>PIPELINE MONITOR</h1>
+        <p class="sub">live I/O · models · tools · prompt</p>
+      </div>
+    </div>
+    <div class="top-status">
+      <span class="pill" id="conn-pill">CONNECTING</span>
+      <span class="pill" id="busy-pill">IDLE</span>
+      <span class="pill" id="route-pill">ROUTE —</span>
+      <span class="pill" id="model-pill">MODEL —</span>
+      <span class="mono" id="uptime">up 0s</span>
+    </div>
+  </header>
+
+  <section class="flow" id="flow">
+    <div class="stage" data-stage="input"><b>INPUT</b><span id="st-input">—</span></div>
+    <div class="arrow">→</div>
+    <div class="stage" data-stage="asr"><b>ASR</b><span id="st-asr">whisper</span></div>
+    <div class="arrow">→</div>
+    <div class="stage" data-stage="intent"><b>INTENT</b><span id="st-intent">keyword / jev / llm</span></div>
+    <div class="arrow">→</div>
+    <div class="stage" data-stage="llm"><b>LLM</b><span id="st-llm">—</span></div>
+    <div class="arrow">→</div>
+    <div class="stage" data-stage="tool"><b>TOOLS</b><span id="st-tool">—</span></div>
+    <div class="arrow">→</div>
+    <div class="stage" data-stage="say"><b>SAY</b><span id="st-say">—</span></div>
+  </section>
+
+  <main class="layout">
+    <section class="col runs">
+      <div class="card">
+        <div class="card-h">
+          <h2>Runs</h2>
+          <span class="meta" id="run-meta">0</span>
+        </div>
+        <ul class="run-list" id="run-list"></ul>
+      </div>
+      <div class="card">
+        <div class="card-h">
+          <h2>Selected run · steps</h2>
+          <span class="meta" id="sel-meta">pick a run</span>
+        </div>
+        <ol class="steps" id="steps"></ol>
+      </div>
+    </section>
+
+    <section class="col io">
+      <div class="card grow">
+        <div class="card-h">
+          <h2>Step I/O</h2>
+          <span class="meta" id="io-meta">—</span>
+        </div>
+        <div class="split">
+          <div>
+            <h3>input</h3>
+            <pre id="io-in">select a step</pre>
+          </div>
+          <div>
+            <h3>output</h3>
+            <pre id="io-out">select a step</pre>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Try a command</h2></div>
+        <form id="try-form" class="try">
+          <input id="try-text" autocomplete="off" placeholder="send through the live agent…"/>
+          <button type="submit">RUN</button>
+        </form>
+      </div>
+    </section>
+
+    <section class="col edit">
+      <div class="card">
+        <div class="card-h">
+          <h2>System prompt</h2>
+          <span class="meta" id="prompt-meta">stock</span>
+        </div>
+        <textarea id="prompt" spellcheck="false"></textarea>
+        <div class="row">
+          <button type="button" id="btn-apply-prompt">APPLY LIVE</button>
+          <button type="button" class="ghost" id="btn-reset">RESET ALL</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>LLM</h2></div>
+        <div class="grid2">
+          <label>model <input id="llm-model"/></label>
+          <label>base_url <input id="llm-url"/></label>
+          <label>temperature <input id="llm-temp" type="number" step="0.05"/></label>
+          <label>max_tokens <input id="llm-tokens" type="number" step="16"/></label>
+        </div>
+        <label class="chk"><input type="checkbox" id="llm-think"/> enable_thinking</label>
+        <button type="button" id="btn-apply-llm">APPLY LLM</button>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Tools</h2><span class="meta">toggle · edit docs</span></div>
+        <ul class="tools" id="tools"></ul>
+        <div class="row">
+          <input id="new-tool" placeholder="new tool name e.g. motion.spin"/>
+          <button type="button" id="btn-add-tool">ADD</button>
+        </div>
+        <button type="button" id="btn-apply-tools">APPLY TOOLS</button>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Keyword → intent</h2></div>
+        <textarea id="keywords" spellcheck="false" class="json"></textarea>
+        <button type="button" id="btn-apply-kw">APPLY KEYWORDS</button>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>Intent → tools</h2></div>
+        <textarea id="intents" spellcheck="false" class="json"></textarea>
+        <button type="button" id="btn-apply-intent">APPLY INTENTS</button>
+      </div>
+    </section>
+  </main>
+  <p class="hint" id="flash"></p>
+  <script src="/monitor.js"></script>
+</body>
+</html>

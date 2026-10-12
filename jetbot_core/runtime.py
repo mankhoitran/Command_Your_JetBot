@@ -23,6 +23,8 @@ from .safety import MotionCommand, SafetyController
 from .spatial import SpatialMemory
 from .task import TaskManager
 from .tools import ToolRouter
+from .trace import TraceRecorder
+from .live import LiveSettings
 from .typesafe_client import TypeSafeClient
 from .whisper_client import WhisperClient
 from .world import WorldState
@@ -78,6 +80,20 @@ class JetBotRuntime(object):
             self.tasks, self.memory, self.typesafe, self.health,
             safety=self.safety, planner=self.planner, spatial=self.spatial,
         )
+        self.tracer = TraceRecorder()
+        self.agent.tracer = self.tracer
+        self.tools.tracer = self.tracer
+        self.llm.tracer = self.tracer
+        self.whisper.tracer = self.tracer
+        self.typesafe.tracer = self.tracer
+        live_path = cfg.get("monitor", {}).get("live_path", "data/live_settings.json")
+        if not os.path.isabs(live_path):
+            live_path = os.path.join(root, live_path)
+        self.live = LiveSettings(live_path)
+        try:
+            self.live.apply(self)
+        except Exception:
+            log.exception("live settings apply failed")
         self._stop = threading.Event()
         self._telem = None
         self.started_at = time.time()
@@ -168,6 +184,56 @@ class JetBotRuntime(object):
             "memory": self.memory.snapshot(),
             "estop": self.safety.estop,
             "allow_motion": bool(self.safety.allow_motion),
+        }
+
+    def pipeline_snapshot(self):
+        """Live pipeline view for the monitor: stages, models, last I/O."""
+        task = self.tasks.snapshot()
+        health = self.health.snapshot()
+        planner_mode = getattr(self.planner, "mode", "idle")
+        llm = self.llm
+        ts = self.typesafe
+        return {
+            "uptime_s": time.time() - self.started_at,
+            "estop": bool(self.safety.estop),
+            "allow_motion": bool(self.safety.allow_motion),
+            "agent": {
+                "busy": bool(self.agent._busy),
+                "pending": len(self.agent._pending),
+                "say": self.agent.last_say,
+                "last_plan": self.agent.last_plan,
+            },
+            "task": task,
+            "planner": {"mode": planner_mode, "recovery": bool(self.planner.in_recovery())},
+            "models": {
+                "llm": {
+                    "name": llm.model,
+                    "url": llm.base_url,
+                    "ok": llm.ok,
+                    "error": llm.last_error,
+                    "latency_s": llm.last_latency_s,
+                    "finish_reason": llm.last_finish_reason,
+                    "temperature": llm.temperature,
+                    "max_tokens": llm.max_tokens,
+                    "thinking": llm.enable_thinking,
+                },
+                "typesafe": {
+                    "name": ts.model,
+                    "enabled": ts.enabled,
+                    "ok": ts.ok,
+                    "error": ts.last_error,
+                    "last_model": ts.last_model,
+                },
+                "whisper": {
+                    "url": self.whisper.base_url,
+                    "ok": self.whisper.ok,
+                    "error": self.whisper.last_error,
+                    "last_text": self.whisper.last_text,
+                },
+            },
+            "health": health,
+            "trace": self.tracer.snapshot(limit=24),
+            "live_updated_ts": self.live.updated_ts,
         }
 
     def handle_manual(self, action, extra=None):

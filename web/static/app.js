@@ -250,14 +250,38 @@
     }
   }
 
+  function micErrorMessage(e) {
+    var name = (e && e.name) || "";
+    if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+      return "mic blocked — allow microphone for this site, then click ALLOW MIC to retry";
+    }
+    if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+      return "no microphone found on this device";
+    }
+    if (name === "NotReadableError" || name === "TrackStartError") {
+      return "microphone is busy — close other apps/tabs using it, then retry";
+    }
+    if (name === "OverconstrainedError") {
+      return "microphone constraints not satisfied — retry with default settings";
+    }
+    if (name === "SecurityError") {
+      return "mic blocked by browser security — open the console via https or localhost";
+    }
+    return "mic error (" + (name || "unknown") + "): " + e;
+  }
+
   function requestMicPermission() {
     if (micReady || micAsking) return Promise.resolve(micReady);
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setVoice("mic not available in this browser", false);
+      if (window.isSecureContext === false) {
+        setVoice("mic needs a secure context — open via https or localhost", false);
+      } else {
+        setVoice("mic not available in this browser", false);
+      }
       return Promise.resolve(false);
     }
     micAsking = true;
-    setVoice("waiting for browser permission…", false);
+    setVoice("requesting microphone…", false);
     return navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
       try {
         stream.getTracks().forEach(function (t) { t.stop(); });
@@ -269,14 +293,7 @@
     }).catch(function (e) {
       micReady = false;
       micAsking = false;
-      var name = (e && e.name) || "";
-      if (name === "NotAllowedError" || name === "PermissionDeniedError") {
-        setVoice("mic blocked — allow microphone for this site, then click ALLOW MIC", false);
-      } else if (name === "NotFoundError") {
-        setVoice("no microphone found", false);
-      } else {
-        setVoice("mic denied: " + e, false);
-      }
+      setVoice(micErrorMessage(e), false);
       return false;
     });
   }
@@ -326,16 +343,22 @@
   }
 
   function uploadAudio(blob, name) {
-    setVoice("uploading…", false);
+    setVoice("stopped — transcribing…", false);
     var fd = new FormData();
     fd.append("file", blob, name || "speech.wav");
     fetch("/api/whisper", { method: "POST", body: fd }).then(function (r) { return r.json(); })
       .then(function (d) {
-        var text = (d && (d.text || d.error)) || "ok";
-        setVoice(text, false);
-        if (d && d.text) $("cmd-text").value = d.text;
+        if (d && d.text) {
+          // Backend already submitted the transcript to the Agent.
+          setVoice("heard: “" + d.text + "” — sent to agent", false);
+          $("cmd-text").value = d.text;
+        } else if (d && d.error) {
+          setVoice("transcription failed: " + d.error + " — retry", false);
+        } else {
+          setVoice("heard nothing — hold TALK and speak, then retry", false);
+        }
       })
-      .catch(function (e) { setVoice(String(e), false); });
+      .catch(function (e) { setVoice("upload failed: " + e + " — retry", false); });
   }
 
   function startMic() {
@@ -360,11 +383,19 @@
       node.connect(mute);
       mute.connect(ctx.destination);
       micRec = { stream: stream, ctx: ctx, node: node, src: src, mute: mute, chunks: chunks };
-      setVoice("listening… release to send", true);
+      setVoice("recording… release HOLD TALK to stop and send", true);
     }).catch(function (e) {
       micReady = false;
-      setVoice("mic denied: " + e, false);
+      setVoice(micErrorMessage(e) + " — click ALLOW MIC to retry", false);
     });
+  }
+
+  function releaseMic(reason) {
+    if (micRec) stopMic();
+    if (micAsking) {
+      // Permission prompt pending; nothing to release until it resolves.
+      micAsking = false;
+    }
   }
 
   function stopMic() {
@@ -418,6 +449,13 @@
     btn.addEventListener("touchend", function (ev) { ev.preventDefault(); stopMic(); });
     btn.addEventListener("touchcancel", function () { if (micRec) stopMic(); });
   })();
+
+  // Never leave the mic stream open: release on leave, hide, or reload.
+  window.addEventListener("pagehide", function () { releaseMic("pagehide"); });
+  window.addEventListener("beforeunload", function () { releaseMic("beforeunload"); });
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) releaseMic("hidden");
+  });
 
   setInterval(tick, 1000);
   tick();

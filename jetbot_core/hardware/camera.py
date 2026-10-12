@@ -253,6 +253,30 @@ class SyntheticCamera(_BaseCapture):
         return img
 
 
+def _open_with_timeout(factory, timeout_s=8.0):
+    """Run a blocking camera open in a daemon thread; None on timeout.
+
+    cv2.VideoCapture on a Nano CSI node can block forever in ioctl when the
+    sensor is busy. Never let a fallback hang process startup: abandon the
+    stuck open (daemon thread dies with the process) and fall through.
+    """
+    result = {}
+    def _target():
+        try:
+            result["cam"] = factory()
+        except Exception as exc:
+            result["error"] = exc
+    thread = threading.Thread(target=_target, name="camera-open")
+    thread.daemon = True
+    thread.start()
+    thread.join(timeout_s)
+    if thread.is_alive():
+        return None, "open timed out after %.0fs (device busy?)" % timeout_s
+    if "cam" in result:
+        return result["cam"], None
+    return None, str(result.get("error", "unknown open failure"))
+
+
 def try_create_camera(cfg, buffer=None):
     cam_cfg = cfg.get("camera", {})
     width = int(cam_cfg.get("width", 320))
@@ -277,14 +301,14 @@ def try_create_camera(cfg, buffer=None):
         log.warning("nvargus camera failed: %s", exc)
     device = cam_cfg.get("device", "/dev/video0")
     if os.path.exists(device):
-        try:
-            cam = V4L2Camera(buffer, width, height, fps, device=device)
+        cam, err = _open_with_timeout(
+            lambda: V4L2Camera(buffer, width, height, fps, device=device))
+        if cam is not None:
             cam.start()
             log.info("Camera backend: v4l2 %s", device)
             return cam, buffer, "v4l2"
-        except Exception as exc:
-            errors.append("v4l2: %s" % exc)
-            log.warning("V4L2 camera failed: %s", exc)
+        errors.append("v4l2: %s" % err)
+        log.warning("V4L2 camera failed: %s", err)
     if not simulate:
         raise RuntimeError("camera init failed: %s" % "; ".join(errors))
     cam = SyntheticCamera(buffer, width, height, fps)

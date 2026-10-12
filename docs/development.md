@@ -16,8 +16,9 @@ cd /home/jetbot/CYJ
 python3 run.py --config /home/jetbot/CYJ/config.yaml
 ```
 
-Console: `http://<nano-ip>:8080`  
-This device: `http://192.168.16.58:8080`
+Console: `https://<nano-ip>:8080` (SSL on; self-signed — accept the warning)  
+Monitor: `https://<nano-ip>:8090`  
+Find the IP with `hostname -I`. Do **not** use `http://` — the port is HTTPS-only and HTTP is reset. `0.0.0.0` in the log is the bind address, not a URL.
 
 E-STOP is the red button and `POST /api/estop`. It does not wait for the LLM.
 

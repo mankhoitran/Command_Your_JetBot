@@ -120,6 +120,9 @@ class Agent(object):
         self._stop = threading.Event()
         self._thread = None
         self.hz = float(cfg.get("loops", {}).get("agent_hz", 4))
+        self.tracer = None
+        self.intent_tools = dict((k, list(v)) for k, v in INTENT_TOOLS.items())
+        self.keyword_map = None  # None = built-in mapping
         bus.subscribe(EventType.NAVIGATION_BLOCKED, self._on_blocked)
         bus.subscribe(EventType.NAVIGATION_RECOVERY_FAILED, self._on_recovery_failed)
         bus.subscribe(EventType.NAVIGATION_RECOVERED, self._on_recovered)
@@ -141,6 +144,43 @@ class Agent(object):
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
+
+    def set_intent_tools(self, mapping):
+        """Replace INTENT_TOOLS from the monitor. mapping: {intent: [{name, args}]}"""
+        converted = {}
+        for intent, tools in (mapping or {}).items():
+            rows = []
+            for tool in tools or []:
+                if isinstance(tool, dict) and tool.get("name"):
+                    rows.append((str(tool["name"]), dict(tool.get("args") or {})))
+                elif isinstance(tool, (list, tuple)) and tool:
+                    rows.append((str(tool[0]), dict(tool[1] if len(tool) > 1 else {})))
+            converted[str(intent)] = rows
+        self.intent_tools = converted
+
+    def reset_intent_tools(self):
+        self.intent_tools = dict((k, list(v)) for k, v in INTENT_TOOLS.items())
+
+    def set_keyword_map(self, mapping):
+        """Replace keyword phrases. mapping: [[phrases, intent], ...]"""
+        clean = []
+        for row in mapping or []:
+            if isinstance(row, dict):
+                phrases = row.get("phrases") or row.get("keys") or []
+                intent = row.get("intent")
+            elif isinstance(row, (list, tuple)) and len(row) >= 2:
+                phrases, intent = row[0], row[1]
+            else:
+                continue
+            if not intent:
+                continue
+            phrases = [str(p) for p in phrases if p]
+            if phrases:
+                clean.append((tuple(phrases), str(intent)))
+        self.keyword_map = clean or None
+
+    def reset_keyword_map(self):
+        self.keyword_map = None
 
     def submit(self, text, source="web"):
         text = (text or "").strip()
@@ -249,11 +289,17 @@ class Agent(object):
         self._busy = True
         text = item["text"]
         user_source = item.get("source")
+        tracer = self.tracer
+        if tracer is not None:
+            tracer.begin_run(user_source or "web", text, kind="command")
         if user_source != "nav":
             self._abort = False
+        status = "ok"
+        err = None
         try:
             if self._aborted():
                 self.last_say = "emergency stop"
+                status = "estop"
                 return
             if self.tasks.state in (IDLE, COMPLETED, FAILED, CANCELLED):
                 self.tasks.start(text[:80], goal=text)
@@ -266,11 +312,19 @@ class Agent(object):
             local = self._local_intent(text, source=user_source)
             if local is not None:
                 intent, conf = local
+                if tracer is not None:
+                    tracer.step("intent", "keyword" if conf >= 0.89 else "typesafe",
+                                input={"text": text},
+                                output={"intent": intent, "confidence": conf},
+                                ok=True)
                 if self._aborted():
+                    status = "estop"
                     return
                 if intent == "status":
                     self.last_say = self.world.summary_for_llm()[:240]
                     self._record("local", intent, self.last_say, [])
+                    if tracer is not None:
+                        tracer.step("say", "status", output=self.last_say, ok=True)
                     try:
                         self.tasks.transition(COMPLETED, action="status", progress=1.0)
                     except ValueError:
@@ -280,12 +334,14 @@ class Agent(object):
                     self.tools.dispatch("motion.stop", {})
                     self.last_say = "Stopping."
                     self._record("local", intent, self.last_say, [{"name": "motion.stop", "args": {}}])
+                    if tracer is not None:
+                        tracer.step("say", "stop", output=self.last_say, ok=True)
                     try:
                         self.tasks.transition(COMPLETED, action="stop", progress=1.0)
                     except ValueError:
                         pass
                     return
-                tools = INTENT_TOOLS.get(intent) or []
+                tools = (getattr(self, "intent_tools", None) or INTENT_TOOLS).get(intent) or INTENT_TOOLS.get(intent) or []
                 results = []
                 for n, a in tools:
                     if self._aborted():
@@ -293,6 +349,9 @@ class Agent(object):
                     results.append(self.tools.dispatch(n, a))
                 self.last_say = say_for_tool_results(results, "OK: %s" % intent)
                 self._record("local", intent, self.last_say, [{"name": n, "args": a} for n, a in tools], results)
+                if tracer is not None:
+                    tracer.step("say", intent, output=self.last_say, ok=True,
+                                extra={"results": results})
                 try:
                     self.tasks.transition(EXECUTING, action="tools", progress=0.5)
                 except ValueError:
@@ -309,10 +368,14 @@ class Agent(object):
             if self.spatial is not None:
                 world_s = world_s + "\n" + self.spatial.summary()
             mem_s = self.memory.summary_for_llm(text)
+            if tracer is not None:
+                tracer.step("intent", "llm", input={"text": text},
+                            output={"world": world_s, "memory": mem_s}, ok=True)
             plan, err = self.llm.plan(text, world_s, mem_s)
             self._last_reason = time.time()
             if self._aborted():
                 self.last_say = "emergency stop"
+                status = "estop"
                 return
             if plan is None:
                 self.bus.emit(EventType.LLM_UNAVAILABLE, "llm", {"error": err})
@@ -320,6 +383,7 @@ class Agent(object):
                 self.last_say = "LLM unavailable; holding position. %s" % (err or "")
                 self.tools.dispatch("motion.stop", {})
                 self._record("llm-fail", None, self.last_say, [])
+                status = "llm-fail"
                 try:
                     self.tasks.transition(FAILED, action="llm", failure=err or "llm")
                 except ValueError:
@@ -357,19 +421,28 @@ class Agent(object):
                     except ValueError:
                         pass
             self._record("llm", None, self.last_say, plan.get("tools") or [], results, plan.get("reason"))
+            if tracer is not None:
+                tracer.step("say", "llm", output=self.last_say, ok=not plan.get("failed"),
+                            extra={"reason": plan.get("reason"), "results": results})
             if plan.get("say"):
                 self.memory.add_note(
                     "Decision: %s (%s)" % (plan.get("say"), plan.get("reason") or ""),
                     reason="confirmation", source="agent", confidence=0.5,
                     context=text[:120],
                 )
-        except Exception:
+            if plan.get("failed"):
+                status = "failed"
+        except Exception as exc:
             log.exception("agent handle failed")
+            status = "error"
+            err = str(exc)
         finally:
             self._busy = False
+            if tracer is not None:
+                tracer.end_run(status=status, say=self.last_say, error=err)
 
     def _keyword_intent(self, text):
-        mapping = [
+        mapping = getattr(self, "keyword_map", None) or [
             (("stop", "halt", "freeze", "estop", "e-stop", "dont move", "do not move"), "stop"),
             (("look around", "scan the room", "check whats around", "inspect room", "survey", "scan"), "scan"),
             (("explore", "wander", "look around the room"), "explore"),

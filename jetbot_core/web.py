@@ -126,10 +126,18 @@ class JetBotHandler(BaseHTTPRequestHandler):
             self.runtime.safety.clear_estop(source="http")
             return self._send(200, _json_bytes({"ok": True, "estop": False}))
         if path == "/api/command":
+            from .telemetry import bind_corr_id, clear_corr_id, new_corr_id
             data = _parse_body(raw, ctype)
             text = data.get("text") or data.get("command") or ""
-            self.runtime.agent.submit(text, source="web")
-            return self._send(200, _json_bytes({"ok": True, "accepted": text[:200]}))
+            corr_id = new_corr_id()
+            bind_corr_id(corr_id)
+            try:
+                self.runtime.agent.submit(text, source="web")
+            finally:
+                clear_corr_id()
+            return self._send(200, _json_bytes({
+                "ok": True, "accepted": text[:200], "corr_id": corr_id,
+            }))
         if path == "/api/manual":
             data = _parse_body(raw, ctype)
             result = self.runtime.handle_manual(data.get("action"), data)
@@ -180,13 +188,20 @@ class JetBotHandler(BaseHTTPRequestHandler):
             audio = raw
         if not audio:
             return self._send(400, _json_bytes({"ok": False, "error": "no audio"}))
-        text, err = self.runtime.whisper.transcribe_bytes(audio, filename=filename)
-        if err:
-            self.runtime.bus.emit(EventType.WHISPER_UNAVAILABLE, "whisper", {"error": err})
-            return self._send(502, _json_bytes({"ok": False, "error": err}))
-        if text:
-            self.runtime.agent.submit(text, source="whisper")
-        return self._send(200, _json_bytes({"ok": True, "text": text}))
+        from .telemetry import bind_corr_id, clear_corr_id, new_corr_id
+        corr_id = new_corr_id()
+        bind_corr_id(corr_id)
+        try:
+            text, err = self.runtime.whisper.transcribe_bytes(audio, filename=filename)
+            if err:
+                self.runtime.bus.emit(EventType.WHISPER_UNAVAILABLE, "whisper", {"error": err},
+                                      corr_id=corr_id)
+                return self._send(502, _json_bytes({"ok": False, "error": err, "corr_id": corr_id}))
+            if text:
+                self.runtime.agent.submit(text, source="whisper")
+            return self._send(200, _json_bytes({"ok": True, "text": text, "corr_id": corr_id}))
+        finally:
+            clear_corr_id()
 
     def _mjpeg(self):
         self.send_response(200)

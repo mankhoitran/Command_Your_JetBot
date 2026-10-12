@@ -320,6 +320,11 @@ class WorldState(object):
         with self._lock:
             return copy.deepcopy(self.health)
 
+    def perception_view(self):
+        """Cheap perception meta for the monitor. No objects deepcopy."""
+        with self._lock:
+            return dict(self.perception)
+
     def set_uncertainty(self, items):
         with self._lock:
             self.uncertainty = list(items)

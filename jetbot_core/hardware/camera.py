@@ -92,6 +92,8 @@ class _BaseCapture(CameraController):
         self._measured_fps = 0.0
         self._error = None
         self.backend = "base"
+        from ..telemetry import LoopMeter
+        self.meter = LoopMeter("camera", self.fps)
 
     def start(self):
         if self._running:
@@ -131,6 +133,10 @@ class _BaseCapture(CameraController):
             self.buffer.put(frame, t0)
             self._ok = True
             self._frames += 1
+            try:
+                self.meter.tick()
+            except Exception:
+                pass
             now = time.time()
             if now - self._fps_ts >= 1.0:
                 self._measured_fps = self._frames / (now - self._fps_ts)

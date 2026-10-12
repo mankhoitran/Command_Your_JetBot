@@ -6,6 +6,7 @@ import logging
 import mimetypes
 import os
 import threading
+import time
 
 try:
     from urllib.parse import urlparse, parse_qs
@@ -66,6 +67,23 @@ class MonitorHandler(BaseHTTPRequestHandler):
             return self._static("index.html")
         if path == "/api/pipeline":
             return self._send(200, _json_bytes(rt.pipeline_snapshot()))
+        if path == "/api/dashboard":
+            snap = rt.pipeline_snapshot()
+            return self._send(200, _json_bytes({
+                "uptime_s": snap.get("uptime_s"),
+                "estop": snap.get("estop"),
+                "allow_motion": snap.get("allow_motion"),
+                "dashboard": snap.get("dashboard"),
+                "agent": snap.get("agent"),
+                "planner": snap.get("planner"),
+                "task": snap.get("task"),
+            }))
+        if path == "/api/motor":
+            tel = getattr(rt, "telemetry", None)
+            payload = tel.motor.snapshot(limit=40) if tel is not None else {"history": []}
+            return self._send(200, _json_bytes(payload))
+        if path == "/api/stream":
+            return self._sse()
         if path == "/api/trace":
             qs = parse_qs(parsed.query or "")
             limit = int((qs.get("limit") or [40])[0])
@@ -75,7 +93,11 @@ class MonitorHandler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query or "")
             limit = int((qs.get("limit") or [80])[0])
             after = float((qs.get("after") or [0])[0])
-            return self._send(200, _json_bytes({"events": rt.bus.recent(limit=limit, after_ts=after)}))
+            after_seq = int((qs.get("after_seq") or [0])[0])
+            return self._send(200, _json_bytes({
+                "events": rt.bus.recent(limit=limit, after_ts=after, after_seq=after_seq),
+                "seq": rt.bus.seq,
+            }))
         if path == "/api/settings":
             return self._send(200, _json_bytes(self._settings_payload()))
         if path == "/api/status":
@@ -121,9 +143,17 @@ class MonitorHandler(BaseHTTPRequestHandler):
             rt.live.save()
             return self._send(200, _json_bytes({"ok": True, "settings": self._settings_payload()}))
         if path == "/api/command":
+            from .telemetry import bind_corr_id, clear_corr_id, new_corr_id
             text = data.get("text") or data.get("command") or ""
-            rt.agent.submit(text, source="monitor")
-            return self._send(200, _json_bytes({"ok": True, "accepted": text[:200]}))
+            corr_id = new_corr_id()
+            bind_corr_id(corr_id)
+            try:
+                rt.agent.submit(text, source="monitor")
+            finally:
+                clear_corr_id()
+            return self._send(200, _json_bytes({
+                "ok": True, "accepted": text[:200], "corr_id": corr_id,
+            }))
         self._send(404, _json_bytes({"error": "not found"}))
 
     def _settings_payload(self):
@@ -163,6 +193,28 @@ class MonitorHandler(BaseHTTPRequestHandler):
             },
             "updated_ts": rt.live.updated_ts,
         }
+
+    def _sse(self):
+        """Push pipeline snapshots. Read-only; disconnect is a no-op."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        rt = self.runtime
+        period = 0.8
+        try:
+            while True:
+                try:
+                    payload = _json_bytes(rt.pipeline_snapshot())
+                except Exception as exc:
+                    payload = _json_bytes({"error": str(exc)})
+                self.wfile.write(b"data: " + payload + b"\n\n")
+                self.wfile.flush()
+                time.sleep(period)
+        except Exception:
+            return
 
     def _static(self, rel):
         path = os.path.normpath(os.path.join(MONITOR_DIR, rel.lstrip("/")))

@@ -107,4 +107,50 @@ textarea.json { min-height: 120px; }
 @media (max-width: 1100px) {
   .layout { grid-template-columns: 1fr; }
   .split { grid-template-columns: 1fr; }
+  .layout.two, .layout.config { grid-template-columns: 1fr; }
+  .grid4 { grid-template-columns: 1fr 1fr; }
+  .topbar { flex-wrap: wrap; }
 }
+.tabs { display: flex; gap: 4px; }
+.tab {
+  background: transparent; border: 1px solid transparent; color: var(--muted);
+  letter-spacing: 0.08em; text-transform: uppercase; font-size: 11px; padding: 6px 10px;
+}
+.tab.on { color: var(--accent); border-color: #1b5a52; background: #12222a; }
+.view { display: none; padding: 12px; }
+.view.on { display: block; }
+.grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+.layout.two { grid-template-columns: 1fr 1fr; margin-top: 12px; }
+.layout.config { grid-template-columns: 1fr 1fr; }
+.kv { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font: 12px var(--mono); }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; }
+.tbl { width: 100%; border-collapse: collapse; font: 12px var(--mono); }
+.tbl th, .tbl td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.tbl th { color: var(--muted); font-weight: 500; letter-spacing: 0.08em; font-size: 10px; }
+.tbl .stale { color: var(--warn); }
+.tbl .error { color: var(--bad); }
+.graph {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: stretch;
+  min-height: 180px;
+}
+.gnode {
+  min-width: 140px; flex: 1 1 140px; background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; cursor: pointer;
+}
+.gnode b { display: block; font-size: 11px; letter-spacing: 0.1em; }
+.gnode .gdet { color: var(--muted); font: 11px var(--mono); margin-top: 4px; word-break: break-word; }
+.gnode.sel { box-shadow: 0 0 0 1px var(--accent); }
+.gnode.ok, .gnode.running { border-color: #2a5a38; }
+.gnode.warn, .gnode.waiting { border-color: #5a4a22; }
+.gnode.error, .gnode.stale { border-color: #5a2a2a; }
+.gnode.locked, .gnode.disabled, .gnode.idle { border-color: var(--line); }
+.gnode .dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px;
+  background: var(--muted);
+}
+.gnode.ok .dot, .gnode.running .dot { background: var(--ok); }
+.gnode.warn .dot, .gnode.waiting .dot { background: var(--warn); }
+.gnode.error .dot, .gnode.stale .dot { background: var(--bad); }
+.gnode.locked .dot { background: var(--accent); }
+.gedges { width: 100%; color: var(--muted); font: 11px var(--mono); margin-top: 8px; }

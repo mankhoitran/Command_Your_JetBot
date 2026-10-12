@@ -61,6 +61,10 @@ stdlib `unittest`, hardware mocked. No physical motion.
 - `GET /api/events` — typed timeline
 - `GET /api/memory` — A-MEM-like notes
 - `GET /video` — MJPEG (overlay if perception has run)
+- Monitor `https://<nano-ip>:8090` — Dashboard / Pipeline / Agent Trace
+- `GET :8090/api/pipeline` — three-view JSON (loops, nodes, traces)
+- `GET :8090/api/stream` — SSE of the same payload
+- `GET :8090/api/motor` — requested / accepted / applied / rejected
 - Logs: stderr from `run.py` (`--log-level DEBUG`)
 
 If the camera is synthetic, CSI failed to open (often because another process

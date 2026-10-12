@@ -20,12 +20,19 @@ def _clamp(value, lo, hi):
 
 
 class MotionCommand(object):
-    def __init__(self, left=0.0, right=0.0, source="none", duration_s=0.4):
+    def __init__(self, left=0.0, right=0.0, source="none", duration_s=0.4, corr_id=None):
         self.left = float(left)
         self.right = float(right)
         self.source = source
         self.duration_s = float(duration_s)
         self.ts = time.time()
+        if corr_id is None:
+            try:
+                from .telemetry import get_corr_id
+                corr_id = get_corr_id()
+            except Exception:
+                corr_id = None
+        self.corr_id = corr_id
 
     def to_dict(self):
         return {
@@ -34,6 +41,7 @@ class MotionCommand(object):
             "source": self.source,
             "duration_s": self.duration_s,
             "ts": self.ts,
+            "corr_id": self.corr_id,
         }
 
 
@@ -66,6 +74,9 @@ class SafetyController(object):
         self._stop = threading.Event()
         self._thread = None
         self.hz = float(cfg.get("loops", {}).get("safety_hz", 20))
+        self.telemetry = None
+        from .telemetry import LoopMeter
+        self.meter = LoopMeter("safety", self.hz)
 
     @property
     def estop(self):
@@ -129,10 +140,21 @@ class SafetyController(object):
         log.info("allow_motion=%s from %s", allowed, source)
         return allowed
 
+    def _ledger(self, phase, command, reason=None):
+        tel = self.telemetry
+        if tel is None:
+            return
+        try:
+            tel.motor.record(phase, command, reason=reason,
+                             corr_id=getattr(command, "corr_id", None))
+        except Exception:
+            return
+
     def request(self, command):
         """Validate and latch a motion command. Returns (ok, reason)."""
         if not isinstance(command, MotionCommand):
             raise TypeError("expected MotionCommand")
+        self._ledger("requested", command)
         with self._lock:
             if self._estop:
                 self._last_reject = "estop"
@@ -142,33 +164,43 @@ class SafetyController(object):
                 estopped = False
                 locked = not self._allow_motion
         if estopped:
+            self._ledger("rejected", command, reason="estop")
             self.bus.emit(EventType.COMMAND_REJECTED, "safety", {
                 "reason": "estop", "source": command.source,
-            })
+                "corr_id": getattr(command, "corr_id", None),
+            }, corr_id=getattr(command, "corr_id", None))
             return False, "estop"
         if locked and (abs(command.left) > 1e-6 or abs(command.right) > 1e-6):
-            held = MotionCommand(0.0, 0.0, command.source, command.duration_s)
+            held = MotionCommand(0.0, 0.0, command.source, command.duration_s,
+                                 corr_id=getattr(command, "corr_id", None))
             held.ts = command.ts
             with self._lock:
                 self._command = held
                 self._last_reject = "motion_locked"
+            self._ledger("rejected", command, reason="motion_locked")
             self.bus.emit(EventType.COMMAND_REJECTED, "safety", {
                 "reason": "motion_locked",
                 "source": command.source,
                 "requested": {"left": command.left, "right": command.right},
-            })
+                "corr_id": getattr(command, "corr_id", None),
+            }, corr_id=getattr(command, "corr_id", None))
             log.info("motion locked (charging); accepted %s without spinning", command.source)
             return False, "motion_locked"
         ok, reason, safe = self.validate(command)
         if not ok:
             with self._lock:
                 self._last_reject = reason
+            self._ledger("rejected", command, reason=reason)
             self.bus.emit(EventType.COMMAND_REJECTED, "safety", {
                 "reason": reason, "source": command.source,
-            })
+                "corr_id": getattr(command, "corr_id", None),
+            }, corr_id=getattr(command, "corr_id", None))
             return False, reason
+        if getattr(safe, "corr_id", None) is None:
+            safe.corr_id = getattr(command, "corr_id", None)
         with self._lock:
             self._command = safe
+        self._ledger("accepted", safe)
         return True, "ok"
 
     def validate(self, command):
@@ -190,16 +222,18 @@ class SafetyController(object):
         view = self.world.obstacles_view()
         obs = view["obstacles"]
         fresh = view["freshness"]
+        corr_id = getattr(command, "corr_id", None)
         if self.require_fresh and moving_fwd and fresh["obstacles"] == "STALE":
-            self.bus.emit(EventType.PERCEPTION_STALE, "safety", {"while": "forward"})
-            return False, "stale_perception", MotionCommand(0, 0, command.source, 0)
+            self.bus.emit(EventType.PERCEPTION_STALE, "safety", {"while": "forward"},
+                          corr_id=corr_id)
+            return False, "stale_perception", MotionCommand(0, 0, command.source, 0, corr_id=corr_id)
         front = obs.get("front_m")
         blocked = bool(obs.get("blocked"))
         if moving_fwd and (blocked or (front is not None and front <= self.min_obstacle_m)):
-            return False, "obstacle", MotionCommand(0, 0, command.source, 0)
+            return False, "obstacle", MotionCommand(0, 0, command.source, 0, corr_id=corr_id)
         # In-place left/right are low-risk; only stop a spin if nearly touching.
         if turning and front is not None and front <= self.turn_obstacle_m:
-            return False, "obstacle", MotionCommand(0, 0, command.source, 0)
+            return False, "obstacle", MotionCommand(0, 0, command.source, 0, corr_id=corr_id)
         if moving_fwd and front is not None and front <= self.slow_obstacle_m:
             scale = max(0.15, (front - self.min_obstacle_m) / max(1e-3, self.slow_obstacle_m - self.min_obstacle_m))
             if left > 0:
@@ -210,7 +244,7 @@ class SafetyController(object):
             left = 0.0
         if abs(right) < self.min_command:
             right = 0.0
-        safe = MotionCommand(left, right, command.source, command.duration_s)
+        safe = MotionCommand(left, right, command.source, command.duration_s, corr_id=corr_id)
         safe.ts = command.ts
         return True, "ok", safe
 
@@ -235,6 +269,10 @@ class SafetyController(object):
         period = 1.0 / max(1.0, self.hz)
         while not self._stop.is_set():
             t0 = time.time()
+            try:
+                self.meter.tick()
+            except Exception:
+                pass
             with self._lock:
                 estop = self._estop
                 allow = self._allow_motion
@@ -244,6 +282,10 @@ class SafetyController(object):
                     self.motors.stop()
                 except Exception:
                     pass
+                source = "estop" if estop else "motion-lock"
+                applied = MotionCommand(0.0, 0.0, source, 0.0,
+                                        corr_id=getattr(cmd, "corr_id", None))
+                self._ledger("applied", applied)
                 self.world.update_robot(left_speed=0.0, right_speed=0.0,
                                         velocity={"linear": 0.0, "angular": 0.0})
             else:
@@ -273,12 +315,18 @@ class SafetyController(object):
                 except Exception as exc:
                     log.error("motor write failed: %s", exc)
                     left = right = 0.0
+                applied = MotionCommand(left, right, source, 0.0,
+                                        corr_id=getattr(cmd, "corr_id", None))
+                self._ledger("applied", applied)
                 self.world.update_robot(
                     left_speed=left,
                     right_speed=right,
                     velocity={"linear": (left + right) * 0.5, "angular": (right - left) * 0.5},
                 )
-                self.world.set_navigation(last_command={"left": left, "right": right, "source": source})
+                self.world.set_navigation(last_command={
+                    "left": left, "right": right, "source": source,
+                    "corr_id": getattr(cmd, "corr_id", None),
+                })
             slept = time.time() - t0
             if slept < period:
                 time.sleep(period - slept)

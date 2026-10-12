@@ -34,6 +34,9 @@ class LocalPlanner(object):
         self.hz = float(cfg.get("loops", {}).get("navigation_hz", 10))
         self._until = 0.0
         self._manual_until = 0.0
+        self._corr_id = None
+        from .telemetry import LoopMeter
+        self.meter = LoopMeter("planner", self.hz)
 
     def start(self):
         if self._thread is not None:
@@ -49,6 +52,8 @@ class LocalPlanner(object):
             self._thread = None
 
     def set_mode(self, mode, duration_s=0.6, target=None):
+        from .telemetry import get_corr_id
+        corr_id = get_corr_id()
         with self._lock:
             self.mode = mode
             self.target = target
@@ -57,6 +62,8 @@ class LocalPlanner(object):
                 self._manual_until = self._until
             if mode != "recovery":
                 self._recovery_failed_emitted = False
+            if corr_id:
+                self._corr_id = corr_id
         self.world.set_navigation(mode=mode, current_target=target)
 
     def halt(self):
@@ -70,8 +77,14 @@ class LocalPlanner(object):
         period = 1.0 / max(1.0, self.hz)
         while not self._stop.is_set():
             t0 = time.time()
+            try:
+                self.meter.tick()
+            except Exception:
+                pass
             cmd = self._compute()
             if cmd is not None:
+                if getattr(cmd, "corr_id", None) is None:
+                    cmd.corr_id = self._corr_id
                 self.safety.request(cmd)
             slept = time.time() - t0
             if slept < period:
@@ -80,11 +93,12 @@ class LocalPlanner(object):
     def _compute(self):
         view = self.world.obstacles_view()
         if view["robot"]["estop"]:
-            return MotionCommand(0, 0, "nav-estop", 0.05)
+            return MotionCommand(0, 0, "nav-estop", 0.05, corr_id=self._corr_id)
         with self._lock:
             mode = self.mode
             until = self._until
             target = self.target
+            corr_id = self._corr_id
         now = time.time()
         if mode != "idle" and mode != "recovery" and now > until:
             with self._lock:
@@ -105,7 +119,7 @@ class LocalPlanner(object):
             if not self._blocked_emitted:
                 self.bus.emit(EventType.NAVIGATION_BLOCKED, "nav", {
                     "front_m": front, "direction": obs.get("direction"),
-                }, confidence=obs.get("confidence", 0.5))
+                }, confidence=obs.get("confidence", 0.5), corr_id=corr_id)
                 self._blocked_emitted = True
             self.world.set_navigation(blocked=True, mode="recovery")
             with self._lock:
@@ -114,17 +128,18 @@ class LocalPlanner(object):
             if (now - self._blocked_since) >= self.recovery_s and not self._recovery_failed_emitted:
                 self.bus.emit(EventType.NAVIGATION_RECOVERY_FAILED, "nav", {
                     "front_m": front, "recovery_s": self.recovery_s,
-                })
+                }, corr_id=corr_id)
                 self._recovery_failed_emitted = True
             turn_left = True
             if len(bins) >= 2:
                 turn_left = bins[0] < bins[-1]
             speed = self.turn_speed
             if turn_left:
-                return MotionCommand(-speed, speed, "recovery", 0.25)
-            return MotionCommand(speed, -speed, "recovery", 0.25)
+                return MotionCommand(-speed, speed, "recovery", 0.25, corr_id=corr_id)
+            return MotionCommand(speed, -speed, "recovery", 0.25, corr_id=corr_id)
         if self._blocked_emitted and not close:
-            self.bus.emit(EventType.NAVIGATION_RECOVERED, "nav", {"front_m": front})
+            self.bus.emit(EventType.NAVIGATION_RECOVERED, "nav", {"front_m": front},
+                          corr_id=corr_id)
             self._blocked_emitted = False
             self._recovery_failed_emitted = False
             self._blocked_since = None

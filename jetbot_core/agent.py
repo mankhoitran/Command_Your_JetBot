@@ -121,6 +121,8 @@ class Agent(object):
         self._thread = None
         self.hz = float(cfg.get("loops", {}).get("agent_hz", 4))
         self.tracer = None
+        from .telemetry import LoopMeter
+        self.meter = LoopMeter("agent", self.hz)
         self.intent_tools = dict((k, list(v)) for k, v in INTENT_TOOLS.items())
         self.keyword_map = None  # None = built-in mapping
         bus.subscribe(EventType.NAVIGATION_BLOCKED, self._on_blocked)
@@ -186,10 +188,13 @@ class Agent(object):
         text = (text or "").strip()
         if not text:
             return None
-        item = {"text": text, "source": source, "ts": time.time()}
+        from .telemetry import get_corr_id, new_corr_id
+        corr_id = get_corr_id() or new_corr_id()
+        item = {"text": text, "source": source, "ts": time.time(), "corr_id": corr_id}
         with self._lock:
             self._pending.append(item)
-        self.bus.emit(EventType.USER_COMMAND, source, {"text": text})
+        self.bus.emit(EventType.USER_COMMAND, source, {"text": text, "corr_id": corr_id},
+                      corr_id=corr_id)
         return item
 
     def _on_voice(self, event):
@@ -275,6 +280,10 @@ class Agent(object):
         period = 1.0 / max(1.0, self.hz)
         while not self._stop.is_set():
             t0 = time.time()
+            try:
+                self.meter.tick()
+            except Exception:
+                pass
             item = None
             with self._lock:
                 if self._pending and not self._busy:
@@ -289,9 +298,12 @@ class Agent(object):
         self._busy = True
         text = item["text"]
         user_source = item.get("source")
+        from .telemetry import bind_corr_id, clear_corr_id, new_corr_id
+        corr_id = item.get("corr_id") or new_corr_id()
+        bind_corr_id(corr_id)
         tracer = self.tracer
         if tracer is not None:
-            tracer.begin_run(user_source or "web", text, kind="command")
+            tracer.begin_run(user_source or "web", text, kind="command", corr_id=corr_id)
         if user_source != "nav":
             self._abort = False
         status = "ok"
@@ -440,6 +452,7 @@ class Agent(object):
             self._busy = False
             if tracer is not None:
                 tracer.end_run(status=status, say=self.last_say, error=err)
+            clear_corr_id()
 
     def _keyword_intent(self, text):
         mapping = getattr(self, "keyword_map", None) or [

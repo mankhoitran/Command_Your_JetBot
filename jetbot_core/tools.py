@@ -136,11 +136,16 @@ class ToolRouter(object):
         if self.tracer is None:
             return
         try:
+            from .telemetry import get_corr_id
+            corr_id = get_corr_id()
+            if isinstance(result, dict) and corr_id and "corr_id" not in result:
+                result["corr_id"] = corr_id
             self.tracer.step(
                 "tool", name, input=args, output=result,
                 ok=bool(result.get("ok")) if isinstance(result, dict) else None,
                 error=(result or {}).get("error") if isinstance(result, dict) else None,
                 latency_s=time.time() - t0,
+                extra={"corr_id": corr_id} if corr_id else None,
             )
         except Exception:
             pass

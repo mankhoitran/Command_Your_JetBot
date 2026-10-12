@@ -7,6 +7,8 @@ import threading
 import time
 import uuid
 
+from .telemetry import get_corr_id, redact
+
 
 def _clip(value, limit=3500):
     if value is None:
@@ -14,6 +16,7 @@ def _clip(value, limit=3500):
     if isinstance(value, (bytes, bytearray)):
         return "<bytes %d>" % len(value)
     if isinstance(value, (dict, list, tuple)):
+        value = redact(value)
         try:
             text = json.dumps(value, default=str)
         except Exception:
@@ -42,7 +45,7 @@ class TraceRecorder(object):
         self.last_llm = None
         self.last_tool = None
 
-    def begin_run(self, source, text, kind="command"):
+    def begin_run(self, source, text, kind="command", corr_id=None):
         run = {
             "id": uuid.uuid4().hex[:10],
             "ts": time.time(),
@@ -55,6 +58,7 @@ class TraceRecorder(object):
             "route": None,
             "steps": [],
             "ended_ts": None,
+            "corr_id": corr_id or get_corr_id(),
         }
         with self._lock:
             self._seq += 1
@@ -88,6 +92,7 @@ class TraceRecorder(object):
                 "route": None,
                 "steps": [],
                 "ended_ts": None,
+                "corr_id": get_corr_id(),
             }
             with self._lock:
                 self._seq += 1
@@ -110,6 +115,7 @@ class TraceRecorder(object):
             "input": _clip(input, 3500),
             "output": _clip(output, 3500),
             "extra": extra or {},
+            "corr_id": get_corr_id() or (extra or {}).get("corr_id"),
         }
         with self._lock:
             self._seq += 1
